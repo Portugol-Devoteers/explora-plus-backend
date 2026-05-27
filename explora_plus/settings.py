@@ -18,6 +18,10 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "core",
+    "accounts",
+    "places",
+    "routes",
+    "tickets",
 ]
 
 MIDDLEWARE = [
