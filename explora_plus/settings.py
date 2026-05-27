@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     "places",
     "routes",
     "tickets",
+    "tour_routes.apps.TourRoutesConfig",
 ]
 
 MIDDLEWARE = [
