@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from math import cos, radians
 
 from tour_routes.constants import (
     TOUR_ROUTE_MODE_DIRECT_FALLBACK,
@@ -9,12 +10,22 @@ from tour_routes.constants import (
 )
 from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
 
-from .exceptions import PoiSearchError, RouteProviderError
+from .exceptions import PoiSearchError
 from .geocoding import NominatimGeocoder
+from .geometry import (
+    METERS_PER_DEGREE_LAT,
+    haversine_distance_m,
+    locate_point_on_route,
+    polyline_distance_m,
+    slice_route_between,
+)
 from .map_builder import GeoJsonMapBuilder
 from .poi_search import OverpassPoiSearcher
 from .poi_selector import PoiSelector
 from .routing import OsrmWalkingRouter
+
+FREE_WALKING_SPEED_MPS = 1.35
+DIRECT_CONNECTOR_MAX_DISTANCE_M = 24.0
 
 
 class TourRoutePlanner:
@@ -89,14 +100,12 @@ class TourRoutePlanner:
     ):
         tour_route_path = None
         if places_to_pass:
-            try:
-                tour_route_path = self._build_conventional_route(
-                    origin=origin,
-                    destination=destination,
-                    places_to_pass=places_to_pass,
-                )
-            except RouteProviderError:
-                tour_route_path = None
+            tour_route_path = self._build_corridor_route(
+                origin=origin,
+                destination=destination,
+                direct_route_path=direct_route_path,
+                places_to_pass=places_to_pass,
+            )
 
         route_path = tour_route_path or direct_route_path
         mode = (
@@ -134,23 +143,128 @@ class TourRoutePlanner:
             location=point,
         )
 
-    def _build_conventional_route(
+    def _build_corridor_route(
         self,
         *,
         origin: ResolvedPoint,
         destination: ResolvedPoint,
+        direct_route_path: RoutePath,
         places_to_pass: list[RoutePoi],
     ) -> RoutePath:
-        waypoints = [
-            ResolvedPoint(label=place.name, location=place.location)
-            for place in places_to_pass
+        checkpoints = [
+            origin.location,
+            *(place.location for place in places_to_pass),
+            destination.location,
         ]
-        return self.router.route(
-            origin,
-            destination,
-            waypoints=waypoints,
-            error_message="Nao foi possivel calcular a rota turistica.",
+        anchors = [
+            locate_point_on_route(point, direct_route_path.coordinates)
+            for point in checkpoints
+        ]
+
+        coordinates: list[GeoPoint] = []
+        for index in range(len(checkpoints) - 1):
+            leg_points = self._build_corridor_leg(
+                start_point=checkpoints[index],
+                end_point=checkpoints[index + 1],
+                start_anchor=anchors[index],
+                end_anchor=anchors[index + 1],
+                direct_route_points=direct_route_path.coordinates,
+            )
+            coordinates = self._merge_coordinates(coordinates, leg_points)
+
+        distance_m = int(round(polyline_distance_m(coordinates)))
+        duration_s = int(round(distance_m / FREE_WALKING_SPEED_MPS)) if distance_m else 0
+        return RoutePath(
+            distance_m=distance_m,
+            duration_s=duration_s,
+            coordinates=coordinates,
         )
+
+    def _build_corridor_leg(
+        self,
+        *,
+        start_point: GeoPoint,
+        end_point: GeoPoint,
+        start_anchor,
+        end_anchor,
+        direct_route_points: list[GeoPoint],
+    ) -> list[GeoPoint]:
+        points: list[GeoPoint] = []
+        points = self._merge_coordinates(
+            points,
+            self._build_sidewalk_connector(
+                start=start_point,
+                end=start_anchor.point,
+                segment_start=start_anchor.segment_start,
+                segment_end=start_anchor.segment_end,
+            ),
+        )
+        points = self._merge_coordinates(
+            points,
+            slice_route_between(
+                direct_route_points,
+                start_anchor.progress_m,
+                end_anchor.progress_m,
+            ),
+        )
+        points = self._merge_coordinates(
+            points,
+            self._build_sidewalk_connector(
+                start=end_anchor.point,
+                end=end_point,
+                segment_start=end_anchor.segment_start,
+                segment_end=end_anchor.segment_end,
+            ),
+        )
+        return points
+
+    def _build_sidewalk_connector(
+        self,
+        *,
+        start: GeoPoint,
+        end: GeoPoint,
+        segment_start: GeoPoint,
+        segment_end: GeoPoint,
+    ) -> list[GeoPoint]:
+        if start.lat == end.lat and start.lng == end.lng:
+            return [start]
+
+        if haversine_distance_m(start, end) <= DIRECT_CONNECTOR_MAX_DISTANCE_M:
+            return [start, end]
+
+        lat_first = self._segment_is_east_west(segment_start, segment_end)
+        elbow = (
+            GeoPoint(lat=end.lat, lng=start.lng)
+            if lat_first
+            else GeoPoint(lat=start.lat, lng=end.lng)
+        )
+        return self._merge_coordinates([start], [elbow, end])
+
+    def _segment_is_east_west(self, start: GeoPoint, end: GeoPoint) -> bool:
+        mid_lat = radians((start.lat + end.lat) / 2)
+        meters_per_degree_lng = max(1.0, METERS_PER_DEGREE_LAT * cos(mid_lat))
+        horizontal_m = abs(end.lng - start.lng) * meters_per_degree_lng
+        vertical_m = abs(end.lat - start.lat) * METERS_PER_DEGREE_LAT
+        return horizontal_m >= vertical_m
+
+    def _merge_coordinates(
+        self,
+        base: list[GeoPoint],
+        extra: list[GeoPoint],
+    ) -> list[GeoPoint]:
+        if not extra:
+            return base
+
+        if not base:
+            return list(extra)
+
+        merged = list(base)
+        for point in extra:
+            previous = merged[-1]
+            if previous.lat == point.lat and previous.lng == point.lng:
+                continue
+            merged.append(point)
+        return merged
 
     def _resequence_places(
         self,
