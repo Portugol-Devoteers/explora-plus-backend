@@ -335,6 +335,57 @@ class TourRouteViewTests(APITestCase):
         mock_build_planner.assert_not_called()
 
     @patch("tour_routes.views.build_default_planner")
+    def test_post_recomputes_when_cached_route_has_no_pois(self, mock_build_planner):
+        fallback_result = self._build_result(
+            places_to_pass=[],
+            mode=TOUR_ROUTE_MODE_DIRECT_FALLBACK,
+            route_path=self._mock_direct_route(),
+            direct_route_path=self._mock_direct_route(),
+            tour_route_path=None,
+        )
+        fallback_payload = self._build_payload(fallback_result)
+        cache_key, canonical_payload = build_search_cache_key(
+            origin_input={"address": "Av. Paulista, 1578, Sao Paulo"},
+            destination_input={"address": "Av. Paulista, 2300, Sao Paulo"},
+        )
+        cache = TourRouteCache.objects.create(
+            cache_key=cache_key,
+            origin_query="Av. Paulista, 1578, Sao Paulo",
+            destination_query="Av. Paulista, 2300, Sao Paulo",
+            search_payload=canonical_payload,
+            route_payload=fallback_payload["route"],
+            map_payload=fallback_payload["map"],
+            hit_count=1,
+        )
+
+        refreshed_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="masp-stop",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        planner = Mock()
+        planner.plan.return_value = (refreshed_result, GeoJsonMapBuilder().build(refreshed_result))
+        mock_build_planner.return_value = planner
+
+        response = self._post_route()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["route"]["mode"], TOUR_ROUTE_MODE_TOUR)
+        self.assertEqual(len(response.data["route"]["places_to_pass"]), 1)
+        cache.refresh_from_db()
+        self.assertEqual(cache.route_payload["mode"], TOUR_ROUTE_MODE_TOUR)
+        self.assertEqual(len(cache.route_payload["places_to_pass"]), 1)
+        self.assertEqual(cache.hit_count, 2)
+        mock_build_planner.assert_called_once()
+
+    @patch("tour_routes.views.build_default_planner")
     def test_post_creates_saved_route_for_authenticated_user(self, mock_build_planner):
         user = User.objects.create_user(
             username="route-user",
