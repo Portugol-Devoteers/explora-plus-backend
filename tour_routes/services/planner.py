@@ -6,15 +6,18 @@ from tour_routes.constants import (
 )
 from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
 
-from .exceptions import PoiSearchError
+from .exceptions import PoiSearchError, RouteProviderError
 from .geocoding import NominatimGeocoder
-from .geometry import polyline_distance_m
+from .geometry import haversine_distance_m
 from .map_builder import GeoJsonMapBuilder
 from .poi_search import OverpassPoiSearcher
 from .poi_selector import PoiSelector
 from .routing import OsrmWalkingRouter
 
 FREE_WALKING_SPEED_MPS = 1.35
+SHORT_HOP_MAX_DISTANCE_M = 300.0
+MAX_DETAILED_LEG_RATIO = 2.3
+MAX_DETAILED_LEG_OVERHEAD_M = 180.0
 
 
 class TourRoutePlanner:
@@ -129,18 +132,92 @@ class TourRoutePlanner:
         destination: ResolvedPoint,
         places_to_pass,
     ) -> RoutePath:
-        coordinates = [
-            origin.location,
-            *(place.location for place in places_to_pass),
-            destination.location,
+        checkpoints = [
+            origin,
+            *(
+                ResolvedPoint(label=place.name, location=place.location)
+                for place in places_to_pass
+            ),
+            destination,
         ]
-        distance_m = int(round(polyline_distance_m(coordinates)))
-        duration_s = int(round(distance_m / FREE_WALKING_SPEED_MPS)) if distance_m else 0
+        coordinates: list[GeoPoint] = []
+        total_distance_m = 0.0
+        total_duration_s = 0.0
+
+        for start, end in zip(checkpoints, checkpoints[1:]):
+            leg = self._build_leg_route(start=start, end=end)
+            total_distance_m += leg.distance_m
+            total_duration_s += leg.duration_s
+
+            if not coordinates:
+                coordinates.extend(leg.coordinates)
+                continue
+
+            coordinates.extend(leg.coordinates[1:])
 
         return RoutePath(
-            distance_m=distance_m,
-            duration_s=duration_s,
+            distance_m=int(round(total_distance_m)),
+            duration_s=int(round(total_duration_s)),
             coordinates=coordinates,
+        )
+
+    def _build_leg_route(self, *, start: ResolvedPoint, end: ResolvedPoint) -> RoutePath:
+        straight_distance_m = haversine_distance_m(start.location, end.location)
+
+        try:
+            detailed_leg = self.router.route(
+                start,
+                end,
+                error_message="Nao foi possivel calcular um trecho da rota turistica.",
+            )
+        except RouteProviderError:
+            return self._build_straight_leg(
+                start=start,
+                end=end,
+                distance_m=straight_distance_m,
+            )
+
+        if self._should_use_straight_leg(
+            detailed_distance_m=detailed_leg.distance_m,
+            straight_distance_m=straight_distance_m,
+        ):
+            return self._build_straight_leg(
+                start=start,
+                end=end,
+                distance_m=straight_distance_m,
+            )
+
+        return detailed_leg
+
+    def _build_straight_leg(
+        self,
+        *,
+        start: ResolvedPoint,
+        end: ResolvedPoint,
+        distance_m: float,
+    ) -> RoutePath:
+        duration_s = int(round(distance_m / FREE_WALKING_SPEED_MPS)) if distance_m else 0
+        return RoutePath(
+            distance_m=int(round(distance_m)),
+            duration_s=duration_s,
+            coordinates=[start.location, end.location],
+        )
+
+    def _should_use_straight_leg(
+        self,
+        *,
+        detailed_distance_m: int,
+        straight_distance_m: float,
+    ) -> bool:
+        if straight_distance_m <= 0:
+            return False
+
+        if straight_distance_m > SHORT_HOP_MAX_DISTANCE_M:
+            return False
+
+        return (
+            detailed_distance_m > straight_distance_m * MAX_DETAILED_LEG_RATIO
+            and detailed_distance_m - straight_distance_m >= MAX_DETAILED_LEG_OVERHEAD_M
         )
 
 
