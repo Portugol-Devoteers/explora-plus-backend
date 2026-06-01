@@ -5,6 +5,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .authentication import OptionalJWTAuthentication
 from .models import SavedTourRoute, TourRouteCache
 from .persistence import (
     build_search_cache_key,
@@ -21,6 +22,7 @@ from .services.planner import build_default_planner
 
 
 class TourRouteView(APIView):
+    authentication_classes = [OptionalJWTAuthentication]
     permission_classes = [AllowAny]
 
     def post(self, request):
