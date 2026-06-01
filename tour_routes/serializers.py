@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from .constants import TOUR_ROUTE_STOP_STATES
+from .models import TourRoutePoiDetail
 from .types import GeoPoint, TourRouteResult
 
 
@@ -45,6 +47,7 @@ class PlaceToPassSerializer(serializers.Serializer):
     source = serializers.CharField()
     included_in_route = serializers.BooleanField()
     waypoint_order = serializers.IntegerField(allow_null=True)
+    state = serializers.ChoiceField(choices=TOUR_ROUTE_STOP_STATES)
 
 
 class RouteSummarySerializer(serializers.Serializer):
@@ -68,6 +71,33 @@ class RoutePayloadSerializer(serializers.Serializer):
 class TourRouteResponseSerializer(serializers.Serializer):
     route = RoutePayloadSerializer()
     map = serializers.JSONField()
+
+
+class SavedTourRouteStopStateSerializer(serializers.Serializer):
+    state = serializers.ChoiceField(choices=TOUR_ROUTE_STOP_STATES)
+
+
+class TourRoutePoiDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TourRoutePoiDetail
+        fields = (
+            "stop_id",
+            "name",
+            "category",
+            "address",
+            "summary",
+            "image_url",
+            "source_url",
+            "opening_hours",
+            "website",
+        )
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        for field_name in ("image_url", "source_url", "opening_hours", "website"):
+            if data.get(field_name) == "":
+                data[field_name] = None
+        return data
 
 
 def serialize_result(
@@ -111,6 +141,7 @@ def serialize_result(
                     "source": poi.source,
                     "included_in_route": poi.included_in_route,
                     "waypoint_order": poi.waypoint_order,
+                    "state": poi.state,
                 }
                 for index, poi in enumerate(result.places_to_pass, start=1)
             ],
@@ -118,3 +149,7 @@ def serialize_result(
         "map": map_payload,
     }
     return TourRouteResponseSerializer(instance=payload).data
+
+
+def serialize_poi_detail(poi_detail: TourRoutePoiDetail) -> dict:
+    return TourRoutePoiDetailSerializer(instance=poi_detail).data

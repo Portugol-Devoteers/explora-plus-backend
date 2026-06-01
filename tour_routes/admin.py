@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import SavedTourRoute, TourRouteCache
+from .models import SavedTourRoute, TourRouteCache, TourRoutePoiDetail
 
 
 @admin.register(TourRouteCache)
@@ -34,3 +34,16 @@ class SavedTourRouteAdmin(admin.ModelAdmin):
         "destination_label",
     )
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(TourRoutePoiDetail)
+class TourRoutePoiDetailAdmin(admin.ModelAdmin):
+    list_display = (
+        "stop_id",
+        "name",
+        "category",
+        "detail_status",
+        "updated_at",
+    )
+    search_fields = ("stop_id", "name", "wikidata_id", "wikipedia_title")
+    readonly_fields = ("created_at", "updated_at", "details_fetched_at")

@@ -34,6 +34,14 @@ class PoiCandidate:
     distance_from_route_m: float
     progress_m: float
     priority: int
+    osm_type: str | None = None
+    osm_id: int | None = None
+    wikidata_id: str | None = None
+    wikipedia_title: str | None = None
+    website: str | None = None
+    opening_hours: str | None = None
+    address: str | None = None
+    raw_tags: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,15 @@ class RoutePoi:
     priority: int
     included_in_route: bool
     waypoint_order: int | None
+    state: str = "active"
+    osm_type: str | None = None
+    osm_id: int | None = None
+    wikidata_id: str | None = None
+    wikipedia_title: str | None = None
+    website: str | None = None
+    opening_hours: str | None = None
+    address: str | None = None
+    raw_tags: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

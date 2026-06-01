@@ -1,14 +1,17 @@
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from tour_routes.constants import (
     TOUR_ROUTE_MODE_DIRECT_FALLBACK,
     TOUR_ROUTE_MODE_TOUR,
+    TOUR_ROUTE_STOP_STATE_ACTIVE,
+    TOUR_ROUTE_STOP_STATE_VISITED,
 )
-from tour_routes.models import SavedTourRoute, TourRouteCache
+from tour_routes.models import SavedTourRoute, TourRouteCache, TourRoutePoiDetail
 from tour_routes.persistence import build_search_cache_key
 from tour_routes.serializers import serialize_result
 from tour_routes.services.exceptions import TourRouteError
@@ -69,6 +72,7 @@ class TourRouteViewTests(APITestCase):
         included_in_route: bool = True,
         waypoint_order: int | None = None,
         distance_from_route_m: float = 20.0,
+        state: str = TOUR_ROUTE_STOP_STATE_ACTIVE,
     ) -> RoutePoi:
         return RoutePoi(
             stop_id=stop_id,
@@ -81,6 +85,7 @@ class TourRouteViewTests(APITestCase):
             priority=0,
             included_in_route=included_in_route,
             waypoint_order=waypoint_order,
+            state=state,
         )
 
     def _build_result(
@@ -506,4 +511,307 @@ class TourRouteViewTests(APITestCase):
         )
         saved_route.refresh_from_db()
         self.assertEqual(saved_route.excluded_stop_ids, ["stop-a"])
+        self.assertEqual(saved_route.visited_stop_ids, [])
         self.assertEqual(saved_route.route_payload["saved_route_id"], saved_route.id)
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_persists_poi_detail_stubs(self, mock_build_planner):
+        result = self._build_result(
+            places_to_pass=[
+                RoutePoi(
+                    stop_id="masp-stop",
+                    name="MASP",
+                    category="culture",
+                    source="overpass",
+                    location=GeoPoint(lat=-23.561414, lng=-46.655881),
+                    distance_from_route_m=12.0,
+                    progress_m=0.0,
+                    priority=0,
+                    included_in_route=True,
+                    waypoint_order=1,
+                    state=TOUR_ROUTE_STOP_STATE_ACTIVE,
+                    osm_type="way",
+                    osm_id=12345,
+                    wikidata_id="Q123",
+                    wikipedia_title="pt:MASP",
+                    website="https://masp.org.br",
+                    opening_hours="Tu-Su 10:00-18:00",
+                    address="Avenida Paulista, 1578, Sao Paulo",
+                    raw_tags={"wikidata": "Q123", "wikipedia": "pt:MASP"},
+                )
+            ]
+        )
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
+
+        response = self._post_route()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(TourRoutePoiDetail.objects.count(), 1)
+        poi_detail = TourRoutePoiDetail.objects.get(stop_id="masp-stop")
+        self.assertEqual(poi_detail.wikidata_id, "Q123")
+        self.assertEqual(poi_detail.wikipedia_title, "pt:MASP")
+        self.assertEqual(poi_detail.website, "https://masp.org.br")
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_patch_stop_state_marks_place_as_visited(self, mock_build_planner):
+        user = User.objects.create_user(
+            username="visited-user",
+            email="visited@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        base_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="stop-a",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                ),
+                self._make_route_poi(
+                    stop_id="stop-b",
+                    name="Parque Trianon",
+                    category="park",
+                    lat=-23.5611,
+                    lng=-46.6530,
+                    waypoint_order=2,
+                ),
+            ]
+        )
+        base_payload = self._build_payload(base_result)
+        cache = TourRouteCache.objects.create(
+            cache_key="cache-stop-state",
+            origin_query="Av. Paulista, 1578, Sao Paulo",
+            destination_query="Av. Paulista, 2300, Sao Paulo",
+            search_payload={},
+            route_payload=base_payload["route"],
+            map_payload=base_payload["map"],
+            hit_count=1,
+        )
+        saved_route = SavedTourRoute.objects.create(
+            user=user,
+            cache=cache,
+            origin_query=cache.origin_query,
+            destination_query=cache.destination_query,
+            origin_label=base_payload["route"]["origin"]["label"],
+            destination_label=base_payload["route"]["destination"]["label"],
+            distance_m=base_payload["route"]["distance_m"],
+            duration_s=base_payload["route"]["duration_s"],
+            route_payload={**base_payload["route"], "saved_route_id": 55},
+            map_payload=base_payload["map"],
+        )
+
+        rebuilt_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="stop-a",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    included_in_route=False,
+                    waypoint_order=None,
+                    state=TOUR_ROUTE_STOP_STATE_VISITED,
+                ),
+                self._make_route_poi(
+                    stop_id="stop-b",
+                    name="Parque Trianon",
+                    category="park",
+                    lat=-23.5611,
+                    lng=-46.6530,
+                    waypoint_order=1,
+                ),
+            ]
+        )
+        planner = Mock()
+        planner.rebuild_from_payload.return_value = (
+            rebuilt_result,
+            GeoJsonMapBuilder().build(rebuilt_result),
+        )
+        mock_build_planner.return_value = planner
+
+        response = self.client.patch(
+            reverse(
+                "saved-tour-route-stop-state",
+                kwargs={"route_id": saved_route.id, "stop_id": "stop-a"},
+            ),
+            data={"state": TOUR_ROUTE_STOP_STATE_VISITED},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["route"]["places_to_pass"][0]["state"], "visited")
+        self.assertFalse(response.data["route"]["places_to_pass"][0]["included_in_route"])
+        saved_route.refresh_from_db()
+        self.assertEqual(saved_route.visited_stop_ids, ["stop-a"])
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_patch_stop_state_restores_active_route(self, mock_build_planner):
+        user = User.objects.create_user(
+            username="reactivate-user",
+            email="reactivate@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        base_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="stop-a",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        base_payload = self._build_payload(base_result)
+        cache = TourRouteCache.objects.create(
+            cache_key="cache-stop-reactivate",
+            origin_query="Av. Paulista, 1578, Sao Paulo",
+            destination_query="Av. Paulista, 2300, Sao Paulo",
+            search_payload={},
+            route_payload=base_payload["route"],
+            map_payload=base_payload["map"],
+            hit_count=1,
+        )
+        saved_route = SavedTourRoute.objects.create(
+            user=user,
+            cache=cache,
+            origin_query=cache.origin_query,
+            destination_query=cache.destination_query,
+            origin_label=base_payload["route"]["origin"]["label"],
+            destination_label=base_payload["route"]["destination"]["label"],
+            excluded_stop_ids=[],
+            visited_stop_ids=["stop-a"],
+            distance_m=base_payload["route"]["distance_m"],
+            duration_s=base_payload["route"]["duration_s"],
+            route_payload={
+                **base_payload["route"],
+                "saved_route_id": 77,
+                "places_to_pass": [
+                    {
+                        **base_payload["route"]["places_to_pass"][0],
+                        "included_in_route": False,
+                        "waypoint_order": None,
+                        "state": "visited",
+                    }
+                ],
+            },
+            map_payload=base_payload["map"],
+        )
+
+        rebuilt_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="stop-a",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                    state=TOUR_ROUTE_STOP_STATE_ACTIVE,
+                )
+            ]
+        )
+        planner = Mock()
+        planner.rebuild_from_payload.return_value = (
+            rebuilt_result,
+            GeoJsonMapBuilder().build(rebuilt_result),
+        )
+        mock_build_planner.return_value = planner
+
+        response = self.client.patch(
+            reverse(
+                "saved-tour-route-stop-state",
+                kwargs={"route_id": saved_route.id, "stop_id": "stop-a"},
+            ),
+            data={"state": TOUR_ROUTE_STOP_STATE_ACTIVE},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["route"]["places_to_pass"][0]["state"], "active")
+        self.assertTrue(response.data["route"]["places_to_pass"][0]["included_in_route"])
+        saved_route.refresh_from_db()
+        self.assertEqual(saved_route.visited_stop_ids, [])
+
+    @patch("tour_routes.views.build_poi_detail_fetcher")
+    def test_get_poi_detail_fetches_and_caches_when_pending(self, mock_build_fetcher):
+        poi_detail = TourRoutePoiDetail.objects.create(
+            stop_id="japan-house",
+            name="Japan House",
+            category="culture",
+            lat=-23.5701,
+            lng=-46.6458,
+            source="overpass",
+            osm_type="way",
+            osm_id=123,
+        )
+        fetcher = Mock()
+
+        def hydrate(record):
+            record.address = "Avenida Paulista, 52, Sao Paulo"
+            record.summary = "Centro cultural da Avenida Paulista."
+            record.image_url = "https://example.com/japan-house.jpg"
+            record.source_url = "https://pt.wikipedia.org/wiki/Japan_House"
+            record.detail_status = "complete"
+            record.details_fetched_at = timezone.now()
+            record.save(
+                update_fields=[
+                    "address",
+                    "summary",
+                    "image_url",
+                    "source_url",
+                    "detail_status",
+                    "details_fetched_at",
+                    "updated_at",
+                ]
+            )
+            return record
+
+        fetcher.hydrate.side_effect = hydrate
+        mock_build_fetcher.return_value = fetcher
+
+        response = self.client.get(
+            reverse("tour-route-poi-detail", kwargs={"stop_id": poi_detail.stop_id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["summary"], "Centro cultural da Avenida Paulista.")
+        poi_detail.refresh_from_db()
+        self.assertEqual(poi_detail.detail_status, "complete")
+        self.assertEqual(poi_detail.image_url, "https://example.com/japan-house.jpg")
+
+    @patch("tour_routes.views.build_poi_detail_fetcher")
+    def test_get_poi_detail_uses_cached_payload_before_fetcher(self, mock_build_fetcher):
+        poi_detail = TourRoutePoiDetail.objects.create(
+            stop_id="cached-poi",
+            name="SESC Avenida Paulista",
+            category="culture",
+            lat=-23.5708,
+            lng=-46.6464,
+            source="overpass",
+            address="Avenida Paulista, 119, Sao Paulo",
+            summary="Centro cultural com mirante e programacao variada.",
+            image_url="https://example.com/sesc.jpg",
+            detail_status="complete",
+            details_fetched_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            reverse("tour-route-poi-detail", kwargs={"stop_id": poi_detail.stop_id})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["summary"],
+            "Centro cultural com mirante e programacao variada.",
+        )
+        mock_build_fetcher.assert_not_called()

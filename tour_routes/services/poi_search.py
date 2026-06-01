@@ -70,6 +70,18 @@ class OverpassPoiSearcher:
                     distance_from_route_m=distance_from_route_m,
                     progress_m=progress_m,
                     priority=self.category_priority[category],
+                    osm_type=str(element.get("type")) if element.get("type") else None,
+                    osm_id=int(element["id"]) if element.get("id") is not None else None,
+                    wikidata_id=tags.get("wikidata"),
+                    wikipedia_title=self._normalize_wikipedia_title(tags.get("wikipedia")),
+                    website=tags.get("website") or tags.get("contact:website"),
+                    opening_hours=tags.get("opening_hours"),
+                    address=self._build_address(tags),
+                    raw_tags={
+                        key: str(value)
+                        for key, value in tags.items()
+                        if isinstance(value, (str, int, float))
+                    },
                 )
             )
 
@@ -119,3 +131,28 @@ out center tags;
         if amenity in {"restaurant", "cafe"}:
             return TOUR_ROUTE_CATEGORY_FOOD
         return None
+
+    def _normalize_wikipedia_title(self, wikipedia_tag: str | None) -> str | None:
+        if not wikipedia_tag:
+            return None
+        normalized = wikipedia_tag.strip()
+        return normalized or None
+
+    def _build_address(self, tags: dict[str, str]) -> str | None:
+        street = tags.get("addr:street")
+        number = tags.get("addr:housenumber")
+        suburb = tags.get("addr:suburb")
+        city = tags.get("addr:city")
+        parts = []
+        if street:
+            street_part = street
+            if number:
+                street_part = f"{street_part}, {number}"
+            parts.append(street_part)
+        if suburb:
+            parts.append(suburb)
+        if city:
+            parts.append(city)
+        if not parts:
+            return None
+        return ", ".join(parts)
