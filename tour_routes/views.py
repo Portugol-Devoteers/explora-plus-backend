@@ -146,4 +146,15 @@ def _should_refresh_cache(cache: TourRouteCache) -> bool:
     route_payload = cache.route_payload or {}
     places = route_payload.get("places_to_pass") or []
     mode = route_payload.get("mode")
-    return mode == "direct_fallback" or len(places) == 0
+    direct_route = route_payload.get("direct_route") or {}
+    distance_m = int(route_payload.get("distance_m") or 0)
+    direct_distance_m = int(direct_route.get("distance_m") or 0)
+
+    if mode == "direct_fallback" or len(places) == 0:
+        return True
+
+    return (
+        mode == "tour"
+        and direct_distance_m > 0
+        and distance_m > direct_distance_m * 5
+    )
