@@ -98,6 +98,7 @@ class GeoJsonMapBuilder:
                         "source": poi.source,
                         "included_in_route": poi.included_in_route,
                         "distance_from_route_m": int(round(poi.distance_from_route_m)),
+                        "state": poi.state,
                     },
                 }
             )

@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 
-from .models import SavedTourRoute, TourRouteCache
+from .models import SavedTourRoute, TourRouteCache, TourRoutePoiDetail
 
 
 def build_search_cache_key(*, origin_input: dict, destination_input: dict) -> tuple[str, dict]:
@@ -109,11 +109,13 @@ def update_saved_route_snapshot(
     *,
     saved_route: SavedTourRoute,
     excluded_stop_ids: list[str],
+    visited_stop_ids: list[str],
     route_payload: dict,
     map_payload: dict,
 ) -> dict:
     response_payload = with_saved_route_id(route_payload, map_payload, saved_route.id)
     saved_route.excluded_stop_ids = excluded_stop_ids
+    saved_route.visited_stop_ids = visited_stop_ids
     saved_route.origin_label = route_payload["origin"]["label"]
     saved_route.destination_label = route_payload["destination"]["label"]
     saved_route.distance_m = int(route_payload["distance_m"])
@@ -123,6 +125,7 @@ def update_saved_route_snapshot(
     saved_route.save(
         update_fields=[
             "excluded_stop_ids",
+            "visited_stop_ids",
             "origin_label",
             "destination_label",
             "distance_m",
@@ -133,6 +136,66 @@ def update_saved_route_snapshot(
         ]
     )
     return response_payload
+
+
+def upsert_poi_detail_stubs(route_pois) -> None:
+    for poi in route_pois:
+        record, created = TourRoutePoiDetail.objects.get_or_create(
+            stop_id=poi.stop_id,
+            defaults={
+                "name": poi.name,
+                "category": poi.category,
+                "lat": poi.location.lat,
+                "lng": poi.location.lng,
+                "source": poi.source,
+                "osm_type": poi.osm_type or "",
+                "osm_id": poi.osm_id,
+                "wikidata_id": poi.wikidata_id or "",
+                "wikipedia_title": poi.wikipedia_title or "",
+                "address": poi.address or "",
+                "website": poi.website or "",
+                "opening_hours": poi.opening_hours or "",
+                "raw_payload": _build_raw_payload(poi.raw_tags),
+            },
+        )
+        if created:
+            continue
+
+        update_fields: list[str] = []
+        for field_name, value in (
+            ("name", poi.name),
+            ("category", poi.category),
+            ("lat", poi.location.lat),
+            ("lng", poi.location.lng),
+            ("source", poi.source),
+            ("osm_type", poi.osm_type or ""),
+            ("osm_id", poi.osm_id),
+            ("wikidata_id", poi.wikidata_id or ""),
+            ("wikipedia_title", poi.wikipedia_title or ""),
+        ):
+            if getattr(record, field_name) != value:
+                setattr(record, field_name, value)
+                update_fields.append(field_name)
+
+        for field_name, value in (
+            ("website", poi.website or ""),
+            ("opening_hours", poi.opening_hours or ""),
+        ):
+            if value and getattr(record, field_name) != value:
+                setattr(record, field_name, value)
+                update_fields.append(field_name)
+
+        if poi.address and not record.address:
+            record.address = poi.address
+            update_fields.append("address")
+
+        raw_payload = _build_raw_payload(poi.raw_tags)
+        if raw_payload and record.raw_payload != raw_payload:
+            record.raw_payload = raw_payload
+            update_fields.append("raw_payload")
+
+        if update_fields:
+            record.save(update_fields=[*update_fields, "updated_at"])
 
 
 def _canonicalize_endpoint(endpoint_input: dict) -> dict:
@@ -147,3 +210,9 @@ def _canonicalize_endpoint(endpoint_input: dict) -> dict:
             "lng": round(float(location["lng"]), 6),
         }
     }
+
+
+def _build_raw_payload(raw_tags: dict[str, str] | None) -> dict:
+    if not raw_tags:
+        return {}
+    return {"tags": raw_tags}

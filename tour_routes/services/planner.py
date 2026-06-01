@@ -6,6 +6,8 @@ from dataclasses import replace
 from tour_routes.constants import (
     TOUR_ROUTE_MODE_DIRECT_FALLBACK,
     TOUR_ROUTE_MODE_TOUR,
+    TOUR_ROUTE_STOP_STATE_ACTIVE,
+    TOUR_ROUTE_STOP_STATE_VISITED,
 )
 from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
 
@@ -65,16 +67,27 @@ class TourRoutePlanner:
         *,
         route_payload: dict,
         excluded_stop_ids: list[str] | None = None,
+        visited_stop_ids: list[str] | None = None,
     ):
         excluded_ids = set(excluded_stop_ids or [])
+        visited_ids = set(visited_stop_ids or [])
         origin = self._resolved_point_from_payload(route_payload["origin"])
         destination = self._resolved_point_from_payload(route_payload["destination"])
         direct_route_path = self._route_path_from_summary(route_payload["direct_route"])
-        places_to_pass = [
-            self._route_poi_from_payload(place_payload)
-            for place_payload in route_payload.get("places_to_pass", [])
-            if place_payload.get("stop_id") not in excluded_ids
-        ]
+        places_to_pass = []
+        for place_payload in route_payload.get("places_to_pass", []):
+            stop_id = place_payload.get("stop_id")
+            if stop_id in excluded_ids:
+                continue
+            place = self._route_poi_from_payload(place_payload)
+            if stop_id in visited_ids:
+                place = replace(
+                    place,
+                    state=TOUR_ROUTE_STOP_STATE_VISITED,
+                    included_in_route=False,
+                    waypoint_order=None,
+                )
+            places_to_pass.append(place)
         return self._build_result(
             origin=origin,
             destination=destination,
@@ -90,13 +103,16 @@ class TourRoutePlanner:
         direct_route_path: RoutePath,
         places_to_pass: list[RoutePoi],
     ):
+        active_places = [
+            poi for poi in places_to_pass if poi.state != TOUR_ROUTE_STOP_STATE_VISITED
+        ]
         tour_route_path = (
             self._build_free_walk_route(
                 origin=origin,
                 destination=destination,
-                places_to_pass=places_to_pass,
+                places_to_pass=active_places,
             )
-            if places_to_pass
+            if active_places
             else None
         )
 
@@ -113,7 +129,7 @@ class TourRoutePlanner:
             direct_route_path=direct_route_path,
             tour_route_path=tour_route_path,
             mode=mode,
-            places_to_pass=self._resequence_places(
+            places_to_pass=self._decorate_places_for_response(
                 places_to_pass,
                 included_in_route=tour_route_path is not None,
             ),
@@ -156,6 +172,37 @@ class TourRoutePlanner:
             coordinates=coordinates,
         )
 
+    def _decorate_places_for_response(
+        self,
+        places_to_pass: list[RoutePoi],
+        *,
+        included_in_route: bool,
+    ) -> list[RoutePoi]:
+        active_places = [
+            poi for poi in places_to_pass if poi.state != TOUR_ROUTE_STOP_STATE_VISITED
+        ]
+        active_lookup = {
+            poi.stop_id: poi
+            for poi in self._resequence_places(
+                active_places,
+                included_in_route=included_in_route,
+            )
+        }
+        resequenced: list[RoutePoi] = []
+        for poi in places_to_pass:
+            if poi.state == TOUR_ROUTE_STOP_STATE_VISITED:
+                resequenced.append(
+                    replace(
+                        poi,
+                        included_in_route=False,
+                        waypoint_order=None,
+                        state=TOUR_ROUTE_STOP_STATE_VISITED,
+                    )
+                )
+                continue
+            resequenced.append(active_lookup[poi.stop_id])
+        return resequenced
+
     def _resequence_places(
         self,
         places_to_pass: list[RoutePoi],
@@ -169,6 +216,7 @@ class TourRoutePlanner:
                     poi,
                     included_in_route=included_in_route,
                     waypoint_order=index if included_in_route else None,
+                    state=TOUR_ROUTE_STOP_STATE_ACTIVE,
                 )
             )
         return resequenced
@@ -189,6 +237,15 @@ class TourRoutePlanner:
             priority=candidate.priority,
             included_in_route=False,
             waypoint_order=None,
+            state=TOUR_ROUTE_STOP_STATE_ACTIVE,
+            osm_type=candidate.osm_type,
+            osm_id=candidate.osm_id,
+            wikidata_id=candidate.wikidata_id,
+            wikipedia_title=candidate.wikipedia_title,
+            website=candidate.website,
+            opening_hours=candidate.opening_hours,
+            address=candidate.address,
+            raw_tags=candidate.raw_tags,
         )
 
     def _route_poi_from_payload(self, place_payload: dict) -> RoutePoi:
@@ -212,6 +269,7 @@ class TourRoutePlanner:
             priority=0,
             included_in_route=bool(place_payload.get("included_in_route")),
             waypoint_order=place_payload.get("waypoint_order"),
+            state=place_payload.get("state", TOUR_ROUTE_STOP_STATE_ACTIVE),
         )
 
     def _resolved_point_from_payload(self, payload: dict) -> ResolvedPoint:

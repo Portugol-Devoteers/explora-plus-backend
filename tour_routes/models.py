@@ -40,6 +40,7 @@ class SavedTourRoute(models.Model):
     origin_label = models.CharField(max_length=255, blank=True)
     destination_label = models.CharField(max_length=255, blank=True)
     excluded_stop_ids = models.JSONField(default=list, blank=True)
+    visited_stop_ids = models.JSONField(default=list, blank=True)
     distance_m = models.PositiveIntegerField(default=0)
     duration_s = models.PositiveIntegerField(default=0)
     route_payload = models.JSONField(default=dict, blank=True)
@@ -57,3 +58,35 @@ class SavedTourRoute(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id} -> {self.destination_label or self.destination_query}"
+
+
+class TourRoutePoiDetail(models.Model):
+    stop_id = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255)
+    category = models.CharField(max_length=32)
+    lat = models.FloatField()
+    lng = models.FloatField()
+    source = models.CharField(max_length=32, default="overpass")
+    osm_type = models.CharField(max_length=16, blank=True)
+    osm_id = models.BigIntegerField(null=True, blank=True)
+    wikidata_id = models.CharField(max_length=64, blank=True)
+    wikipedia_title = models.CharField(max_length=255, blank=True)
+    address = models.TextField(blank=True)
+    summary = models.TextField(blank=True)
+    image_url = models.URLField(blank=True)
+    source_url = models.URLField(blank=True)
+    website = models.URLField(blank=True)
+    opening_hours = models.CharField(max_length=255, blank=True)
+    detail_status = models.CharField(max_length=32, default="pending")
+    raw_payload = models.JSONField(default=dict, blank=True)
+    details_fetched_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Detalhe de ponto turistico"
+        verbose_name_plural = "Detalhes de pontos turisticos"
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name

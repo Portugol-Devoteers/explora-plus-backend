@@ -1,6 +1,9 @@
 from django.test import SimpleTestCase
 
-from tour_routes.serializers import TourRouteRequestSerializer
+from tour_routes.serializers import (
+    SavedTourRouteStopStateSerializer,
+    TourRouteRequestSerializer,
+)
 
 
 class TourRouteRequestSerializerTests(SimpleTestCase):
@@ -48,3 +51,8 @@ class TourRouteRequestSerializerTests(SimpleTestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("origin", serializer.errors)
+
+    def test_accepts_stop_state_patch_payload(self):
+        serializer = SavedTourRouteStopStateSerializer(data={"state": "visited"})
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
