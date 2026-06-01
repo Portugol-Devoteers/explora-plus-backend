@@ -37,7 +37,7 @@ class TourRouteView(APIView):
         )
         cache = TourRouteCache.objects.filter(cache_key=cache_key).first()
 
-        if cache is None:
+        if cache is None or _should_refresh_cache(cache):
             planner = build_default_planner()
             try:
                 result, map_payload = planner.plan(
@@ -140,3 +140,10 @@ def _endpoint_query(endpoint_input: dict) -> str:
 
     location = endpoint_input["location"]
     return f'{float(location["lat"]):.6f},{float(location["lng"]):.6f}'
+
+
+def _should_refresh_cache(cache: TourRouteCache) -> bool:
+    route_payload = cache.route_payload or {}
+    places = route_payload.get("places_to_pass") or []
+    mode = route_payload.get("mode")
+    return mode == "direct_fallback" or len(places) == 0
