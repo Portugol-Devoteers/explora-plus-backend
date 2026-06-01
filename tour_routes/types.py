@@ -37,8 +37,24 @@ class PoiCandidate:
 
 
 @dataclass(frozen=True)
+class RoutePoi:
+    name: str
+    category: str
+    source: str
+    location: GeoPoint
+    distance_from_route_m: float
+    progress_m: float
+    priority: int
+    included_in_route: bool
+    waypoint_order: int | None
+
+
+@dataclass(frozen=True)
 class TourRouteResult:
     origin: ResolvedPoint
     destination: ResolvedPoint
     route_path: RoutePath
-    places_to_pass: list[PoiCandidate]
+    direct_route_path: RoutePath
+    tour_route_path: RoutePath | None
+    mode: str
+    places_to_pass: list[RoutePoi]

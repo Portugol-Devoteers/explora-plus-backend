@@ -2,39 +2,65 @@ from __future__ import annotations
 
 from urllib.error import HTTPError, URLError
 
-from tour_routes.types import ResolvedPoint, RoutePath, GeoPoint
+from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath
 
 from .exceptions import RouteProviderError
 from .http import JsonHttpClient
 
 
 class OsrmWalkingRouter:
-    endpoint = "https://router.project-osrm.org/route/v1/foot"
+    endpoint = "https://router.project-osrm.org"
 
     def __init__(self, client: JsonHttpClient | None = None):
         self.client = client or JsonHttpClient()
 
-    def route(self, origin: ResolvedPoint, destination: ResolvedPoint) -> RoutePath:
-        coordinates = (
-            f"{origin.location.lng},{origin.location.lat};"
-            f"{destination.location.lng},{destination.location.lat}"
+    def route(
+        self,
+        origin: ResolvedPoint,
+        destination: ResolvedPoint,
+        *,
+        waypoints: list[ResolvedPoint] | None = None,
+        error_message: str = "Nao foi possivel calcular a rota principal.",
+    ) -> RoutePath:
+        route_points = [origin, *(waypoints or []), destination]
+        payload = self._fetch_payload(
+            service="route",
+            route_points=route_points,
+            params={
+                "overview": "full",
+                "geometries": "geojson",
+            },
+            error_message=error_message,
         )
+        routes = payload.get("routes") or []
+        if not routes:
+            raise RouteProviderError(error_message)
+
+        return self._build_route_path(routes[0])
+
+    def _fetch_payload(
+        self,
+        *,
+        service: str,
+        route_points: list[ResolvedPoint],
+        params: dict[str, str],
+        error_message: str,
+    ) -> dict:
+        coordinates = ";".join(
+            f"{point.location.lng},{point.location.lat}" for point in route_points
+        )
+        url = f"{self.endpoint}/{service}/v1/foot/{coordinates}"
 
         try:
-            payload = self.client.get_json(
-                f"{self.endpoint}/{coordinates}",
-                params={
-                    "overview": "full",
-                    "geometries": "geojson",
-                },
-            )
+            payload = self.client.get_json(url, params=params)
         except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-            raise RouteProviderError("Nao foi possivel calcular a rota principal.") from exc
+            raise RouteProviderError(error_message) from exc
 
-        if payload.get("code") != "Ok" or not payload.get("routes"):
-            raise RouteProviderError("Nao foi possivel calcular a rota principal.")
+        if payload.get("code") != "Ok":
+            raise RouteProviderError(error_message)
+        return payload
 
-        route = payload["routes"][0]
+    def _build_route_path(self, route: dict) -> RoutePath:
         geometry = route.get("geometry", {})
         raw_coordinates = geometry.get("coordinates") or []
         if not raw_coordinates:

@@ -2,10 +2,14 @@
 
 ## Objetivo
 
-O endpoint `POST /api/tour-routes/` calcula uma rota principal a pe entre origem e destino e sugere lugares interessantes proximos desse trajeto. A resposta devolve:
+O endpoint `POST /api/tour-routes/` calcula primeiro uma rota direta a pe entre origem e destino, usa esse trajeto para descobrir pontos de interesse e, quando possivel, monta uma rota turistica livre de pedestre passando por todos os pontos selecionados.
 
-- `route`: dados da rota e a lista ordenada de lugares pelos quais vale passar
-- `map`: um GeoJSON pronto para o app renderizar a linha da rota e os marcadores
+A resposta devolve:
+
+- `route`: dados da rota ativa para o app desenhar
+- `route.direct_route`: a linha direta do OSRM a pe guardada para comparacao e fallback
+- `route.places_to_pass`: a lista completa de sugestoes, indicando quais viraram paradas reais
+- `map`: um GeoJSON pronto para o app renderizar rota turistica, rota direta e marcadores
 
 Este servico nao usa autenticacao nem banco de dados.
 
@@ -43,6 +47,7 @@ Cada ponta da rota aceita **exatamente um** destes formatos:
 ```json
 {
   "route": {
+    "mode": "tour",
     "origin": {
       "label": "Av. Paulista, 1578 - Bela Vista, Sao Paulo",
       "location": { "lat": -23.561399, "lng": -46.655881 }
@@ -51,14 +56,25 @@ Cada ponta da rota aceita **exatamente um** destes formatos:
       "label": "Av. Paulista, 2300 - Cerqueira Cesar, Sao Paulo",
       "location": { "lat": -23.555070, "lng": -46.639550 }
     },
-    "distance_m": 360,
-    "duration_s": 280,
+    "distance_m": 540,
+    "duration_s": 510,
     "polyline_points": [
       { "lat": -23.561399, "lng": -46.655881 },
-      { "lat": -23.559100, "lng": -46.650100 },
-      { "lat": -23.557200, "lng": -46.644800 },
+      { "lat": -23.561414, "lng": -46.655881 },
+      { "lat": -23.561100, "lng": -46.653000 },
+      { "lat": -23.568000, "lng": -46.640800 },
       { "lat": -23.555070, "lng": -46.639550 }
     ],
+    "direct_route": {
+      "distance_m": 360,
+      "duration_s": 280,
+      "polyline_points": [
+        { "lat": -23.561399, "lng": -46.655881 },
+        { "lat": -23.559100, "lng": -46.650100 },
+        { "lat": -23.557200, "lng": -46.644800 },
+        { "lat": -23.555070, "lng": -46.639550 }
+      ]
+    },
     "places_to_pass": [
       {
         "order": 1,
@@ -66,13 +82,31 @@ Cada ponta da rota aceita **exatamente um** destes formatos:
         "category": "culture",
         "location": { "lat": -23.561414, "lng": -46.655881 },
         "distance_from_route_m": 12,
-        "source": "overpass"
+        "source": "overpass",
+        "included_in_route": true,
+        "waypoint_order": 1
       }
     ]
   },
   "map": {
     "type": "FeatureCollection",
-    "features": []
+    "features": [
+      {
+        "type": "Feature",
+        "geometry": { "type": "LineString", "coordinates": [] },
+        "properties": { "kind": "route_tour", "active": true }
+      },
+      {
+        "type": "Feature",
+        "geometry": { "type": "LineString", "coordinates": [] },
+        "properties": { "kind": "route_direct", "active": false }
+      },
+      {
+        "type": "Feature",
+        "geometry": { "type": "Point", "coordinates": [] },
+        "properties": { "kind": "stop", "waypoint_order": 1 }
+      }
+    ]
   }
 }
 ```
@@ -81,17 +115,20 @@ Cada ponta da rota aceita **exatamente um** destes formatos:
 
 ### `route`
 
+- `mode`: `tour` quando a rota multi-parada ficou pronta, `direct_fallback` quando o app deve usar a rota direta
 - `origin` e `destination`: pontos resolvidos pelo backend
-- `distance_m`: distancia total estimada da rota principal
-- `duration_s`: duracao estimada a pe
-- `polyline_points`: lista de coordenadas da rota principal
-- `places_to_pass`: lista ordenada de pontos de interesse proximos da rota
+- `distance_m`, `duration_s` e `polyline_points`: sempre descrevem a rota ativa
+- `direct_route`: copia da rota direta original para comparacao e fallback
+- `places_to_pass`: lista ordenada completa de pontos de interesse
+- `included_in_route`: informa se o ponto entrou como parada real
+- `waypoint_order`: ordem real da visita quando o ponto entrou na rota turistica
 
 ### `map`
 
 - sempre retorna um GeoJSON `FeatureCollection`
-- contem um `LineString` para a rota
-- contem `Point`s para origem, destino e pontos de interesse
+- contem um `LineString` `route_tour` quando a rota turistica foi calculada
+- contem um `LineString` `route_direct` com a linha original
+- contem `Point`s para origem, destino, paradas reais (`stop`) e sugestoes extras (`poi`)
 - o app pode renderizar esse GeoJSON do jeito que preferir
 
 ## Exemplo com curl
@@ -105,9 +142,14 @@ curl -X POST http://localhost:8080/api/tour-routes/ \
   }'
 ```
 
+## Modos de operacao
+
+- `tour`: a rota ativa passa por todos os POIs selecionados usando uma caminhada livre entre os pontos, permitindo atravessar a rua sem ficar presa a mao de carro
+- `direct_fallback`: a rota ativa fica direta porque nao havia POIs suficientes ou porque a rota turistica nao ficou disponivel
+
 ## Erros esperados
 
 - `400`: request invalido ou endereco nao encontrado
 - `502`: falha ao calcular a rota principal
 
-Se a busca de pontos de interesse falhar, a API ainda devolve `200` com a rota principal e `places_to_pass` vazio.
+Se a busca de pontos de interesse falhar, a API ainda devolve `200` com a rota ativa disponivel e `places_to_pass` vazio.

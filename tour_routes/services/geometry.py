@@ -29,6 +29,16 @@ def route_cumulative_distances(points: list[GeoPoint]) -> list[float]:
     return distances
 
 
+def polyline_distance_m(points: list[GeoPoint]) -> float:
+    if len(points) < 2:
+        return 0.0
+
+    total = 0.0
+    for start, end in zip(points, points[1:]):
+        total += haversine_distance_m(start, end)
+    return total
+
+
 def sample_route_positions(total_distance_m: float, interval_m: float = 100.0) -> list[float]:
     if total_distance_m <= 0:
         return [0.0]
