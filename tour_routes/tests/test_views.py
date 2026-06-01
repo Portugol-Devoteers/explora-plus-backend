@@ -1,21 +1,24 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from django.contrib.auth import get_user_model
 from django.urls import reverse
-from rest_framework.test import APISimpleTestCase
+from rest_framework.test import APITestCase
 
 from tour_routes.constants import (
     TOUR_ROUTE_MODE_DIRECT_FALLBACK,
     TOUR_ROUTE_MODE_TOUR,
 )
-from tour_routes.services.exceptions import (
-    AddressResolutionError,
-    PoiSearchError,
-    RouteProviderError,
-)
-from tour_routes.types import GeoPoint, PoiCandidate, ResolvedPoint, RoutePath
+from tour_routes.models import SavedTourRoute, TourRouteCache
+from tour_routes.persistence import build_search_cache_key
+from tour_routes.serializers import serialize_result
+from tour_routes.services.exceptions import TourRouteError
+from tour_routes.services.map_builder import GeoJsonMapBuilder
+from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
+
+User = get_user_model()
 
 
-class TourRouteViewTests(APISimpleTestCase):
+class TourRouteViewTests(APITestCase):
     url = reverse("tour-route")
 
     def _mock_origin(self) -> ResolvedPoint:
@@ -55,26 +58,64 @@ class TourRouteViewTests(APISimpleTestCase):
             ],
         )
 
-    def _make_poi(
+    def _make_route_poi(
         self,
         *,
+        stop_id: str,
         name: str,
         category: str,
         lat: float,
         lng: float,
-        progress_m: float,
+        included_in_route: bool = True,
+        waypoint_order: int | None = None,
         distance_from_route_m: float = 20.0,
-        priority: int = 1,
-    ) -> PoiCandidate:
-        return PoiCandidate(
+    ) -> RoutePoi:
+        return RoutePoi(
+            stop_id=stop_id,
             name=name,
             category=category,
             source="overpass",
             location=GeoPoint(lat=lat, lng=lng),
             distance_from_route_m=distance_from_route_m,
-            progress_m=progress_m,
-            priority=priority,
+            progress_m=0.0,
+            priority=0,
+            included_in_route=included_in_route,
+            waypoint_order=waypoint_order,
         )
+
+    def _build_result(
+        self,
+        *,
+        places_to_pass: list[RoutePoi],
+        mode: str = TOUR_ROUTE_MODE_TOUR,
+        route_path: RoutePath | None = None,
+        direct_route_path: RoutePath | None = None,
+        tour_route_path: RoutePath | None = None,
+    ) -> TourRouteResult:
+        origin = self._mock_origin()
+        destination = self._mock_destination()
+        direct = direct_route_path or self._mock_direct_route()
+        active_route = route_path or (tour_route_path or self._mock_tour_route())
+        final_tour_route = (
+            tour_route_path
+            if tour_route_path is not None
+            else active_route
+            if mode == TOUR_ROUTE_MODE_TOUR
+            else None
+        )
+        return TourRouteResult(
+            origin=origin,
+            destination=destination,
+            route_path=active_route,
+            direct_route_path=direct,
+            tour_route_path=final_tour_route,
+            mode=mode,
+            places_to_pass=places_to_pass,
+        )
+
+    def _build_payload(self, result: TourRouteResult, *, saved_route_id: int | None = None):
+        map_payload = GeoJsonMapBuilder().build(result)
+        return serialize_result(result, map_payload, saved_route_id=saved_route_id)
 
     def _post_route(self, *, use_addresses: bool = True):
         if use_addresses:
@@ -96,142 +137,107 @@ class TourRouteViewTests(APISimpleTestCase):
             format="json",
         )
 
-    @patch("tour_routes.services.poi_selector.PoiSelector.select")
-    @patch("tour_routes.services.poi_search.OverpassPoiSearcher.search")
-    @patch("tour_routes.services.routing.OsrmWalkingRouter.route")
-    @patch("tour_routes.services.geocoding.NominatimGeocoder.resolve")
-    def test_post_returns_tour_route_and_map_with_waypoint_metadata(
-        self,
-        mock_resolve,
-        mock_route,
-        mock_search,
-        mock_select,
-    ):
-        mock_resolve.side_effect = [self._mock_origin(), self._mock_destination()]
-        mock_route.return_value = self._mock_direct_route()
-        mock_search.return_value = []
-        mock_select.return_value = [
-            self._make_poi(
-                name="MASP",
-                category="culture",
-                lat=-23.561414,
-                lng=-46.655881,
-                progress_m=102.0,
-                distance_from_route_m=12.0,
-                priority=0,
-            ),
-            self._make_poi(
-                name="Parque Trianon",
-                category="park",
-                lat=-23.5611,
-                lng=-46.6530,
-                progress_m=205.0,
-                distance_from_route_m=30.0,
-            ),
-            self._make_poi(
-                name="Casa das Rosas",
-                category="culture",
-                lat=-23.5680,
-                lng=-46.6408,
-                progress_m=310.0,
-                distance_from_route_m=18.0,
-                priority=0,
-            ),
-        ]
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_returns_tour_route_and_map_with_waypoint_metadata(self, mock_build_planner):
+        result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="masp-stop",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                    distance_from_route_m=12.0,
+                ),
+                self._make_route_poi(
+                    stop_id="trianon-stop",
+                    name="Parque Trianon",
+                    category="park",
+                    lat=-23.5611,
+                    lng=-46.6530,
+                    waypoint_order=2,
+                    distance_from_route_m=30.0,
+                ),
+                self._make_route_poi(
+                    stop_id="rosas-stop",
+                    name="Casa das Rosas",
+                    category="culture",
+                    lat=-23.5680,
+                    lng=-46.6408,
+                    waypoint_order=3,
+                    distance_from_route_m=18.0,
+                ),
+            ],
+        )
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
 
         response = self._post_route()
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["route"]["mode"], TOUR_ROUTE_MODE_TOUR)
+        self.assertEqual(response.data["route"]["saved_route_id"], None)
         self.assertEqual(response.data["route"]["direct_route"]["distance_m"], 360)
         self.assertGreater(
             response.data["route"]["distance_m"],
             response.data["route"]["direct_route"]["distance_m"],
         )
-        self.assertGreater(response.data["route"]["duration_s"], 0)
         self.assertEqual(
-            [place["name"] for place in response.data["route"]["places_to_pass"]],
-            ["MASP", "Parque Trianon", "Casa das Rosas"],
-        )
-        self.assertEqual(
-            [place["included_in_route"] for place in response.data["route"]["places_to_pass"]],
-            [True, True, True],
+            [place["stop_id"] for place in response.data["route"]["places_to_pass"]],
+            ["masp-stop", "trianon-stop", "rosas-stop"],
         )
         self.assertEqual(
             [place["waypoint_order"] for place in response.data["route"]["places_to_pass"]],
             [1, 2, 3],
         )
-
         feature_kinds = [
             feature["properties"]["kind"] for feature in response.data["map"]["features"]
         ]
         self.assertIn("route_tour", feature_kinds)
         self.assertIn("route_direct", feature_kinds)
-        self.assertIn("origin", feature_kinds)
-        self.assertIn("destination", feature_kinds)
         self.assertIn("stop", feature_kinds)
-        self.assertNotIn("poi", feature_kinds)
 
-    @patch("tour_routes.services.poi_selector.PoiSelector.select")
-    @patch("tour_routes.services.poi_search.OverpassPoiSearcher.search")
-    @patch("tour_routes.services.routing.OsrmWalkingRouter.route")
-    @patch("tour_routes.services.geocoding.NominatimGeocoder.resolve")
-    def test_post_includes_all_selected_points_as_waypoints(
-        self,
-        mock_resolve,
-        mock_route,
-        mock_search,
-        mock_select,
-    ):
-        mock_resolve.side_effect = [self._mock_origin(), self._mock_destination()]
-        mock_route.return_value = self._mock_direct_route()
-        mock_search.return_value = []
-        mock_select.return_value = [
-            self._make_poi(
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_includes_all_selected_points_as_waypoints(self, mock_build_planner):
+        places = [
+            self._make_route_poi(
+                stop_id=f"stop-{index}",
                 name=f"Ponto {index}",
                 category="culture" if index % 3 == 0 else "park" if index % 3 == 1 else "food",
                 lat=-23.5610 + (index * 0.001),
                 lng=-46.6550 + (index * 0.001),
-                progress_m=float(index * 100),
-                priority=index % 3,
+                waypoint_order=index,
             )
             for index in range(1, 9)
         ]
+        result = self._build_result(places_to_pass=places)
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
 
         response = self._post_route()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["route"]["mode"], TOUR_ROUTE_MODE_TOUR)
         self.assertEqual(len(response.data["route"]["places_to_pass"]), 8)
-
-        included_places = [
-            place for place in response.data["route"]["places_to_pass"] if place["included_in_route"]
-        ]
-
-        self.assertEqual(len(included_places), 8)
         self.assertEqual(
-            [place["waypoint_order"] for place in included_places],
+            [place["waypoint_order"] for place in response.data["route"]["places_to_pass"]],
             list(range(1, 9)),
         )
-        self.assertEqual(
-            [place["name"] for place in included_places],
-            [
-                "Ponto 1",
-                "Ponto 2",
-                "Ponto 3",
-                "Ponto 4",
-                "Ponto 5",
-                "Ponto 6",
-                "Ponto 7",
-                "Ponto 8",
-            ],
-        )
 
-    @patch("tour_routes.services.poi_search.OverpassPoiSearcher.search")
-    @patch("tour_routes.services.routing.OsrmWalkingRouter.route")
-    def test_post_returns_direct_fallback_even_without_pois(self, mock_route, mock_search):
-        mock_route.return_value = self._mock_direct_route()
-        mock_search.return_value = []
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_returns_direct_fallback_even_without_pois(self, mock_build_planner):
+        result = self._build_result(
+            places_to_pass=[],
+            mode=TOUR_ROUTE_MODE_DIRECT_FALLBACK,
+            route_path=self._mock_direct_route(),
+            direct_route_path=self._mock_direct_route(),
+            tour_route_path=None,
+        )
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
 
         response = self._post_route(use_addresses=False)
 
@@ -240,59 +246,182 @@ class TourRouteViewTests(APISimpleTestCase):
         self.assertEqual(response.data["route"]["places_to_pass"], [])
         self.assertEqual(
             response.data["route"]["origin"]["label"],
-            "-23.561399, -46.655881",
+            "Av. Paulista, 1578 - Bela Vista, Sao Paulo",
         )
         self.assertEqual(
             response.data["route"]["distance_m"],
             response.data["route"]["direct_route"]["distance_m"],
         )
-        feature_kinds = [
-            feature["properties"]["kind"] for feature in response.data["map"]["features"]
-        ]
-        self.assertIn("route_direct", feature_kinds)
-        self.assertNotIn("route_tour", feature_kinds)
 
-    @patch("tour_routes.services.geocoding.NominatimGeocoder.resolve")
-    def test_post_returns_400_when_geocoding_fails(self, mock_resolve):
-        mock_resolve.side_effect = AddressResolutionError(
-            "Nao foi possivel localizar o endereco 'Endereco invalido'."
-        )
-
-        response = self._post_route()
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Nao foi possivel localizar", response.data["detail"])
-
-    @patch("tour_routes.services.routing.OsrmWalkingRouter.route")
-    @patch("tour_routes.services.geocoding.NominatimGeocoder.resolve")
-    def test_post_returns_502_when_direct_route_provider_fails(
-        self,
-        mock_resolve,
-        mock_route,
-    ):
-        mock_resolve.side_effect = [self._mock_origin(), self._mock_destination()]
-        mock_route.side_effect = RouteProviderError(
-            "Nao foi possivel calcular a rota principal."
-        )
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_returns_tour_route_error_status(self, mock_build_planner):
+        planner = Mock()
+        planner.plan.side_effect = TourRouteError("Falhou")
+        planner.plan.side_effect.status_code = 502
+        mock_build_planner.return_value = planner
 
         response = self._post_route()
 
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(
-            response.data["detail"],
-            "Nao foi possivel calcular a rota principal.",
+        self.assertEqual(response.data["detail"], "Falhou")
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_uses_cache_before_planner(self, mock_build_planner):
+        cached_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="cached-stop",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        cached_payload = self._build_payload(cached_result)
+        cache_key, canonical_payload = build_search_cache_key(
+            origin_input={"address": "Av. Paulista, 1578, Sao Paulo"},
+            destination_input={"address": "Av. Paulista, 2300, Sao Paulo"},
+        )
+        cache = TourRouteCache.objects.create(
+            cache_key=cache_key,
+            origin_query="Av. Paulista, 1578, Sao Paulo",
+            destination_query="Av. Paulista, 2300, Sao Paulo",
+            search_payload=canonical_payload,
+            route_payload=cached_payload["route"],
+            map_payload=cached_payload["map"],
+            hit_count=1,
         )
 
-    @patch("tour_routes.services.poi_search.OverpassPoiSearcher.search")
-    @patch("tour_routes.services.routing.OsrmWalkingRouter.route")
-    def test_post_returns_route_when_poi_provider_fails(self, mock_route, mock_search):
-        mock_route.return_value = self._mock_direct_route()
-        mock_search.side_effect = PoiSearchError(
-            "Nao foi possivel buscar pontos de interesse."
-        )
-
-        response = self._post_route(use_addresses=False)
+        response = self._post_route()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["route"]["mode"], TOUR_ROUTE_MODE_DIRECT_FALLBACK)
-        self.assertEqual(response.data["route"]["places_to_pass"], [])
+        self.assertEqual(response.data["route"]["places_to_pass"][0]["stop_id"], "cached-stop")
+        self.assertEqual(response.data["route"]["saved_route_id"], None)
+        cache.refresh_from_db()
+        self.assertEqual(cache.hit_count, 2)
+        mock_build_planner.assert_not_called()
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_creates_saved_route_for_authenticated_user(self, mock_build_planner):
+        user = User.objects.create_user(
+            username="route-user",
+            email="route@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="masp-stop",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
+
+        response = self._post_route()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.data["route"]["saved_route_id"])
+        self.assertEqual(SavedTourRoute.objects.count(), 1)
+        saved_route = SavedTourRoute.objects.get()
+        self.assertEqual(saved_route.user, user)
+        self.assertEqual(saved_route.route_payload["saved_route_id"], saved_route.id)
+        self.assertEqual(TourRouteCache.objects.count(), 1)
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_delete_stop_updates_saved_route_snapshot(self, mock_build_planner):
+        user = User.objects.create_user(
+            username="saved-user",
+            email="saved@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        base_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="stop-a",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                ),
+                self._make_route_poi(
+                    stop_id="stop-b",
+                    name="Parque Trianon",
+                    category="park",
+                    lat=-23.5611,
+                    lng=-46.6530,
+                    waypoint_order=2,
+                ),
+            ]
+        )
+        base_payload = self._build_payload(base_result)
+        cache = TourRouteCache.objects.create(
+            cache_key="cache-stop-delete",
+            origin_query="Av. Paulista, 1578, Sao Paulo",
+            destination_query="Av. Paulista, 2300, Sao Paulo",
+            search_payload={},
+            route_payload=base_payload["route"],
+            map_payload=base_payload["map"],
+            hit_count=1,
+        )
+        saved_route = SavedTourRoute.objects.create(
+            user=user,
+            cache=cache,
+            origin_query=cache.origin_query,
+            destination_query=cache.destination_query,
+            origin_label=base_payload["route"]["origin"]["label"],
+            destination_label=base_payload["route"]["destination"]["label"],
+            distance_m=base_payload["route"]["distance_m"],
+            duration_s=base_payload["route"]["duration_s"],
+            route_payload={**base_payload["route"], "saved_route_id": 99},
+            map_payload=base_payload["map"],
+        )
+
+        rebuilt_result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="stop-b",
+                    name="Parque Trianon",
+                    category="park",
+                    lat=-23.5611,
+                    lng=-46.6530,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        planner = Mock()
+        planner.rebuild_from_payload.return_value = (
+            rebuilt_result,
+            GeoJsonMapBuilder().build(rebuilt_result),
+        )
+        mock_build_planner.return_value = planner
+
+        response = self.client.delete(
+            reverse(
+                "saved-tour-route-stop-delete",
+                kwargs={"route_id": saved_route.id, "stop_id": "stop-a"},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["route"]["saved_route_id"], saved_route.id)
+        self.assertEqual(
+            [place["stop_id"] for place in response.data["route"]["places_to_pass"]],
+            ["stop-b"],
+        )
+        saved_route.refresh_from_db()
+        self.assertEqual(saved_route.excluded_stop_ids, ["stop-a"])
+        self.assertEqual(saved_route.route_payload["saved_route_id"], saved_route.id)

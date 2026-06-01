@@ -36,6 +36,7 @@ class ResolvedPointSerializer(serializers.Serializer):
 
 
 class PlaceToPassSerializer(serializers.Serializer):
+    stop_id = serializers.CharField()
     order = serializers.IntegerField()
     name = serializers.CharField()
     category = serializers.CharField()
@@ -53,6 +54,7 @@ class RouteSummarySerializer(serializers.Serializer):
 
 
 class RoutePayloadSerializer(serializers.Serializer):
+    saved_route_id = serializers.IntegerField(allow_null=True, required=False)
     mode = serializers.CharField()
     origin = ResolvedPointSerializer()
     destination = ResolvedPointSerializer()
@@ -68,9 +70,15 @@ class TourRouteResponseSerializer(serializers.Serializer):
     map = serializers.JSONField()
 
 
-def serialize_result(result: TourRouteResult, map_payload: dict) -> dict:
+def serialize_result(
+    result: TourRouteResult,
+    map_payload: dict,
+    *,
+    saved_route_id: int | None = None,
+) -> dict:
     payload = {
         "route": {
+            "saved_route_id": saved_route_id,
             "origin": {
                 "label": result.origin.label,
                 "location": result.origin.location.as_dict(),
@@ -94,6 +102,7 @@ def serialize_result(result: TourRouteResult, map_payload: dict) -> dict:
             },
             "places_to_pass": [
                 {
+                    "stop_id": poi.stop_id,
                     "order": index,
                     "name": poi.name,
                     "category": poi.category,
