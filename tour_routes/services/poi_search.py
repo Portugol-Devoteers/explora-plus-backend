@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from urllib.error import HTTPError, URLError
 
+from tour_routes.constants import (
+    TOUR_ROUTE_CATEGORY_CULTURE,
+    TOUR_ROUTE_CATEGORY_FOOD,
+    TOUR_ROUTE_CATEGORY_PARK,
+    TOUR_ROUTE_CATEGORY_PRIORITY,
+)
 from tour_routes.types import GeoPoint, PoiCandidate, RoutePath
 
 from .exceptions import PoiSearchError
@@ -13,11 +19,7 @@ MAX_DISTANCE_FROM_ROUTE_M = 250.0
 
 class OverpassPoiSearcher:
     endpoint = "https://overpass-api.de/api/interpreter"
-    category_priority = {
-        "culture": 0,
-        "park": 1,
-        "food": 2,
-    }
+    category_priority = TOUR_ROUTE_CATEGORY_PRIORITY
 
     def __init__(self, client: JsonHttpClient | None = None):
         self.client = client or JsonHttpClient()
@@ -103,13 +105,17 @@ out center tags;
         leisure = tags.get("leisure")
 
         if tourism in {"museum", "gallery", "attraction", "artwork", "viewpoint"}:
-            return "culture" if tourism != "viewpoint" else "park"
+            return (
+                TOUR_ROUTE_CATEGORY_CULTURE
+                if tourism != "viewpoint"
+                else TOUR_ROUTE_CATEGORY_PARK
+            )
         if "historic" in tags:
-            return "culture"
+            return TOUR_ROUTE_CATEGORY_CULTURE
         if amenity in {"theatre", "arts_centre"}:
-            return "culture"
+            return TOUR_ROUTE_CATEGORY_CULTURE
         if leisure in {"park", "garden"}:
-            return "park"
+            return TOUR_ROUTE_CATEGORY_PARK
         if amenity in {"restaurant", "cafe"}:
-            return "food"
+            return TOUR_ROUTE_CATEGORY_FOOD
         return None
