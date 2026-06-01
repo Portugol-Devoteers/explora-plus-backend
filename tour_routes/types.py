@@ -38,6 +38,7 @@ class PoiCandidate:
 
 @dataclass(frozen=True)
 class RoutePoi:
+    stop_id: str
     name: str
     category: str
     source: str

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
+
 from tour_routes.constants import (
     TOUR_ROUTE_MODE_DIRECT_FALLBACK,
     TOUR_ROUTE_MODE_TOUR,
@@ -8,16 +11,10 @@ from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, Tour
 
 from .exceptions import PoiSearchError, RouteProviderError
 from .geocoding import NominatimGeocoder
-from .geometry import haversine_distance_m
 from .map_builder import GeoJsonMapBuilder
 from .poi_search import OverpassPoiSearcher
 from .poi_selector import PoiSelector
 from .routing import OsrmWalkingRouter
-
-FREE_WALKING_SPEED_MPS = 1.35
-SHORT_HOP_MAX_DISTANCE_M = 300.0
-MAX_DETAILED_LEG_RATIO = 2.3
-MAX_DETAILED_LEG_OVERHEAD_M = 180.0
 
 
 class TourRoutePlanner:
@@ -46,19 +43,60 @@ class TourRoutePlanner:
         except PoiSearchError:
             poi_candidates = []
 
-        places_to_pass = self.poi_selector.select(
-            poi_candidates, route_distance_m=direct_route_path.distance_m
+        selected_candidates = self.poi_selector.select(
+            poi_candidates,
+            route_distance_m=direct_route_path.distance_m,
+        )
+        selected_places = [
+            self._route_poi_from_candidate(candidate) for candidate in selected_candidates
+        ]
+        return self._build_result(
+            origin=origin,
+            destination=destination,
+            direct_route_path=direct_route_path,
+            places_to_pass=selected_places,
         )
 
+    def rebuild_from_payload(
+        self,
+        *,
+        route_payload: dict,
+        excluded_stop_ids: list[str] | None = None,
+    ):
+        excluded_ids = set(excluded_stop_ids or [])
+        origin = self._resolved_point_from_payload(route_payload["origin"])
+        destination = self._resolved_point_from_payload(route_payload["destination"])
+        direct_route_path = self._route_path_from_summary(route_payload["direct_route"])
+        places_to_pass = [
+            self._route_poi_from_payload(place_payload)
+            for place_payload in route_payload.get("places_to_pass", [])
+            if place_payload.get("stop_id") not in excluded_ids
+        ]
+        return self._build_result(
+            origin=origin,
+            destination=destination,
+            direct_route_path=direct_route_path,
+            places_to_pass=places_to_pass,
+        )
+
+    def _build_result(
+        self,
+        *,
+        origin: ResolvedPoint,
+        destination: ResolvedPoint,
+        direct_route_path: RoutePath,
+        places_to_pass: list[RoutePoi],
+    ):
         tour_route_path = None
-        included_waypoint_indices: list[int] = []
         if places_to_pass:
-            tour_route_path = self._build_free_walk_route(
-                origin=origin,
-                destination=destination,
-                places_to_pass=places_to_pass,
-            )
-            included_waypoint_indices = list(range(len(places_to_pass)))
+            try:
+                tour_route_path = self._build_conventional_route(
+                    origin=origin,
+                    destination=destination,
+                    places_to_pass=places_to_pass,
+                )
+            except RouteProviderError:
+                tour_route_path = None
 
         route_path = tour_route_path or direct_route_path
         mode = (
@@ -66,7 +104,6 @@ class TourRoutePlanner:
             if tour_route_path is not None
             else TOUR_ROUTE_MODE_DIRECT_FALLBACK
         )
-
         result = TourRouteResult(
             origin=origin,
             destination=destination,
@@ -74,9 +111,9 @@ class TourRoutePlanner:
             direct_route_path=direct_route_path,
             tour_route_path=tour_route_path,
             mode=mode,
-            places_to_pass=self._annotate_places(
+            places_to_pass=self._resequence_places(
                 places_to_pass,
-                included_waypoint_indices=included_waypoint_indices,
+                included_in_route=tour_route_path is not None,
             ),
         )
         map_payload = self.map_builder.build(result)
@@ -97,128 +134,113 @@ class TourRoutePlanner:
             location=point,
         )
 
-    def _annotate_places(
-        self,
-        places_to_pass,
-        *,
-        included_waypoint_indices: list[int],
-    ) -> list[RoutePoi]:
-        waypoint_order_by_index = {
-            index: order
-            for order, index in enumerate(included_waypoint_indices, start=1)
-        }
-
-        annotated_places: list[RoutePoi] = []
-        for index, poi in enumerate(places_to_pass):
-            annotated_places.append(
-                RoutePoi(
-                    name=poi.name,
-                    category=poi.category,
-                    source=poi.source,
-                    location=poi.location,
-                    distance_from_route_m=poi.distance_from_route_m,
-                    progress_m=poi.progress_m,
-                    priority=poi.priority,
-                    included_in_route=index in waypoint_order_by_index,
-                    waypoint_order=waypoint_order_by_index.get(index),
-                )
-            )
-        return annotated_places
-
-    def _build_free_walk_route(
+    def _build_conventional_route(
         self,
         *,
         origin: ResolvedPoint,
         destination: ResolvedPoint,
-        places_to_pass,
+        places_to_pass: list[RoutePoi],
     ) -> RoutePath:
-        checkpoints = [
-            origin,
-            *(
-                ResolvedPoint(label=place.name, location=place.location)
-                for place in places_to_pass
-            ),
-            destination,
+        waypoints = [
+            ResolvedPoint(label=place.name, location=place.location)
+            for place in places_to_pass
         ]
-        coordinates: list[GeoPoint] = []
-        total_distance_m = 0.0
-        total_duration_s = 0.0
-
-        for start, end in zip(checkpoints, checkpoints[1:]):
-            leg = self._build_leg_route(start=start, end=end)
-            total_distance_m += leg.distance_m
-            total_duration_s += leg.duration_s
-
-            if not coordinates:
-                coordinates.extend(leg.coordinates)
-                continue
-
-            coordinates.extend(leg.coordinates[1:])
-
-        return RoutePath(
-            distance_m=int(round(total_distance_m)),
-            duration_s=int(round(total_duration_s)),
-            coordinates=coordinates,
+        return self.router.route(
+            origin,
+            destination,
+            waypoints=waypoints,
+            error_message="Nao foi possivel calcular a rota turistica.",
         )
 
-    def _build_leg_route(self, *, start: ResolvedPoint, end: ResolvedPoint) -> RoutePath:
-        straight_distance_m = haversine_distance_m(start.location, end.location)
-
-        try:
-            detailed_leg = self.router.route(
-                start,
-                end,
-                error_message="Nao foi possivel calcular um trecho da rota turistica.",
+    def _resequence_places(
+        self,
+        places_to_pass: list[RoutePoi],
+        *,
+        included_in_route: bool,
+    ) -> list[RoutePoi]:
+        resequenced: list[RoutePoi] = []
+        for index, poi in enumerate(places_to_pass, start=1):
+            resequenced.append(
+                replace(
+                    poi,
+                    included_in_route=included_in_route,
+                    waypoint_order=index if included_in_route else None,
+                )
             )
-        except RouteProviderError:
-            return self._build_straight_leg(
-                start=start,
-                end=end,
-                distance_m=straight_distance_m,
-            )
+        return resequenced
 
-        if self._should_use_straight_leg(
-            detailed_distance_m=detailed_leg.distance_m,
-            straight_distance_m=straight_distance_m,
-        ):
-            return self._build_straight_leg(
-                start=start,
-                end=end,
-                distance_m=straight_distance_m,
-            )
+    def _route_poi_from_candidate(self, candidate) -> RoutePoi:
+        return RoutePoi(
+            stop_id=self._build_stop_id(
+                name=candidate.name,
+                category=candidate.category,
+                location=candidate.location,
+            ),
+            name=candidate.name,
+            category=candidate.category,
+            source=candidate.source,
+            location=candidate.location,
+            distance_from_route_m=candidate.distance_from_route_m,
+            progress_m=candidate.progress_m,
+            priority=candidate.priority,
+            included_in_route=False,
+            waypoint_order=None,
+        )
 
-        return detailed_leg
+    def _route_poi_from_payload(self, place_payload: dict) -> RoutePoi:
+        location = GeoPoint(
+            lat=float(place_payload["location"]["lat"]),
+            lng=float(place_payload["location"]["lng"]),
+        )
+        stop_id = place_payload.get("stop_id") or self._build_stop_id(
+            name=place_payload["name"],
+            category=place_payload["category"],
+            location=location,
+        )
+        return RoutePoi(
+            stop_id=stop_id,
+            name=place_payload["name"],
+            category=place_payload["category"],
+            source=place_payload.get("source", "cache"),
+            location=location,
+            distance_from_route_m=float(place_payload.get("distance_from_route_m", 0)),
+            progress_m=float(place_payload.get("progress_m", 0)),
+            priority=0,
+            included_in_route=bool(place_payload.get("included_in_route")),
+            waypoint_order=place_payload.get("waypoint_order"),
+        )
 
-    def _build_straight_leg(
+    def _resolved_point_from_payload(self, payload: dict) -> ResolvedPoint:
+        return ResolvedPoint(
+            label=payload["label"],
+            location=GeoPoint(
+                lat=float(payload["location"]["lat"]),
+                lng=float(payload["location"]["lng"]),
+            ),
+        )
+
+    def _route_path_from_summary(self, summary: dict) -> RoutePath:
+        return RoutePath(
+            distance_m=int(summary["distance_m"]),
+            duration_s=int(summary["duration_s"]),
+            coordinates=[
+                GeoPoint(lat=float(point["lat"]), lng=float(point["lng"]))
+                for point in summary.get("polyline_points", [])
+            ],
+        )
+
+    def _build_stop_id(
         self,
         *,
-        start: ResolvedPoint,
-        end: ResolvedPoint,
-        distance_m: float,
-    ) -> RoutePath:
-        duration_s = int(round(distance_m / FREE_WALKING_SPEED_MPS)) if distance_m else 0
-        return RoutePath(
-            distance_m=int(round(distance_m)),
-            duration_s=duration_s,
-            coordinates=[start.location, end.location],
+        name: str,
+        category: str,
+        location: GeoPoint,
+    ) -> str:
+        raw = (
+            f"{name.casefold()}|{category}|"
+            f"{location.lat:.6f}|{location.lng:.6f}"
         )
-
-    def _should_use_straight_leg(
-        self,
-        *,
-        detailed_distance_m: int,
-        straight_distance_m: float,
-    ) -> bool:
-        if straight_distance_m <= 0:
-            return False
-
-        if straight_distance_m > SHORT_HOP_MAX_DISTANCE_M:
-            return False
-
-        return (
-            detailed_distance_m > straight_distance_m * MAX_DETAILED_LEG_RATIO
-            and detailed_distance_m - straight_distance_m >= MAX_DETAILED_LEG_OVERHEAD_M
-        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def build_default_planner() -> TourRoutePlanner:

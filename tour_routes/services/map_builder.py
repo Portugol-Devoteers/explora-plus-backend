@@ -90,6 +90,7 @@ class GeoJsonMapBuilder:
                     },
                     "properties": {
                         "kind": "stop" if poi.included_in_route else "poi",
+                        "stop_id": poi.stop_id,
                         "order": index,
                         "waypoint_order": poi.waypoint_order,
                         "name": poi.name,
