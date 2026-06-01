@@ -137,6 +137,13 @@ class TourRouteViewTests(APITestCase):
             format="json",
         )
 
+    def _post_route_with_invalid_token(self):
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer definitely-invalid-token")
+        try:
+            return self._post_route()
+        finally:
+            self.client.credentials()
+
     @patch("tour_routes.views.build_default_planner")
     def test_post_returns_tour_route_and_map_with_waypoint_metadata(self, mock_build_planner):
         result = self._build_result(
@@ -264,6 +271,30 @@ class TourRouteViewTests(APITestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.data["detail"], "Falhou")
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_post_ignores_invalid_token_for_public_route(self, mock_build_planner):
+        result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="masp-stop",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
+
+        response = self._post_route_with_invalid_token()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["route"]["saved_route_id"], None)
+        self.assertEqual(TourRouteCache.objects.count(), 1)
 
     @patch("tour_routes.views.build_default_planner")
     def test_post_uses_cache_before_planner(self, mock_build_planner):
