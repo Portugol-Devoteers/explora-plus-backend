@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-O endpoint `POST /api/tour-routes/` calcula primeiro uma rota direta a pe entre origem e destino, usa esse trajeto para descobrir pontos de interesse e, quando possivel, monta uma rota turistica livre de pedestre passando por todos os pontos selecionados.
+O endpoint `POST /api/tour-routes/` calcula primeiro uma rota direta a pe entre origem e destino, usa esse trajeto para descobrir pontos de interesse e, quando possivel, monta uma rota turistica hibrida passando por todos os pontos selecionados.
 
 A resposta devolve:
 
@@ -144,7 +144,7 @@ curl -X POST http://localhost:8080/api/tour-routes/ \
 
 ## Modos de operacao
 
-- `tour`: a rota ativa passa por todos os POIs selecionados usando uma caminhada livre entre os pontos, permitindo atravessar a rua sem ficar presa a mao de carro
+- `tour`: a rota ativa passa por todos os POIs selecionados usando trechos detalhados a pe entre as paradas, mas pode cortar diretamente pequenos saltos quando o mapa de ruas faz um contorno exagerado
 - `direct_fallback`: a rota ativa fica direta porque nao havia POIs suficientes ou porque a rota turistica nao ficou disponivel
 
 ## Erros esperados
