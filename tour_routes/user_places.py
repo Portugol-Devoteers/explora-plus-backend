@@ -2,80 +2,62 @@ from __future__ import annotations
 
 from django.utils import timezone
 
-from .models import SavedTourRoute, TourRoutePoiDetail, UserTourPlace
-from .persistence import upsert_poi_detail_stubs_from_route_payload
+from core.domain import ROUTE_STOP_STATE_ACTIVE, ROUTE_STOP_STATE_EXCLUDED
+from places.catalog import get_place_by_stop_id, upsert_places_from_route_payload
+from places.models import UserPlaceState
+
+from .models import TourRoute
 
 
-def get_latest_saved_route(user) -> SavedTourRoute | None:
+def get_latest_tour_route(user) -> TourRoute | None:
     return (
-        SavedTourRoute.objects.select_related("cache")
+        TourRoute.objects.select_related("search_cache")
         .filter(user=user)
         .order_by("-created_at", "-id")
         .first()
     )
 
 
-def ensure_user_tour_places_from_route_payload(
+def ensure_user_place_states_from_route_payload(
     *,
     user,
     route_payload: dict,
-    saved_route: SavedTourRoute | None = None,
+    route: TourRoute | None = None,
     touch_existing: bool = True,
-) -> list[UserTourPlace]:
-    upsert_poi_detail_stubs_from_route_payload(route_payload)
-    places: list[UserTourPlace] = []
-    for place in route_payload.get("places_to_pass", []):
-        stop_id = place.get("stop_id")
+) -> list[UserPlaceState]:
+    upsert_places_from_route_payload(route_payload)
+    states: list[UserPlaceState] = []
+    for place_payload in route_payload.get("places_to_pass", []):
+        stop_id = place_payload.get("stop_id")
         if not stop_id:
             continue
 
-        poi_detail = TourRoutePoiDetail.objects.filter(stop_id=stop_id).first()
-        if poi_detail is None:
+        place = get_place_by_stop_id(stop_id)
+        if place is None:
             continue
 
-        user_place, created = UserTourPlace.objects.get_or_create(
+        state, created = UserPlaceState.objects.get_or_create(
             user=user,
-            poi_detail=poi_detail,
+            place=place,
             defaults={
-                "is_visited": bool(place.get("state") == "visited"),
-                "visited_at": timezone.now() if place.get("state") == "visited" else None,
+                "is_visited": bool(place_payload.get("state") == "visited"),
+                "visited_at": timezone.now()
+                if place_payload.get("state") == "visited"
+                else None,
                 "seen_count": 1,
-                "last_seen_route": saved_route,
+                "last_seen_route": route,
             },
         )
         if created:
-            places.append(user_place)
+            states.append(state)
             continue
 
         if touch_existing:
-            user_place.seen_count += 1
-            user_place.last_seen_route = saved_route
-            user_place.save(
-                update_fields=["seen_count", "last_seen_route", "last_seen_at"]
-            )
-        places.append(user_place)
-
-    return places
-
-
-def ensure_user_tour_place_for_stop(
-    *,
-    user,
-    stop_id: str,
-    route_payload: dict,
-    saved_route: SavedTourRoute | None = None,
-) -> UserTourPlace | None:
-    ensure_user_tour_places_from_route_payload(
-        user=user,
-        route_payload=route_payload,
-        saved_route=saved_route,
-        touch_existing=False,
-    )
-    return (
-        UserTourPlace.objects.select_related("poi_detail")
-        .filter(user=user, poi_detail__stop_id=stop_id)
-        .first()
-    )
+            state.seen_count += 1
+            state.last_seen_route = route
+            state.save(update_fields=["seen_count", "last_seen_route", "last_seen_at"])
+        states.append(state)
+    return states
 
 
 def get_visited_stop_ids_for_route_payload(*, user, route_payload: dict) -> list[str]:
@@ -86,119 +68,122 @@ def get_visited_stop_ids_for_route_payload(*, user, route_payload: dict) -> list
     ]
     if not stop_ids:
         return []
-
     return list(
-        UserTourPlace.objects.filter(
+        UserPlaceState.objects.filter(
             user=user,
-            poi_detail__stop_id__in=stop_ids,
+            place__source_ref__in=stop_ids,
             is_visited=True,
-        ).values_list("poi_detail__stop_id", flat=True)
+        ).values_list("place__source_ref", flat=True)
     )
 
 
-def set_user_tour_place_visited(
+def set_user_place_visited(
     *,
     user,
     stop_id: str,
     visited: bool,
     route_payload: dict | None = None,
-    saved_route: SavedTourRoute | None = None,
-) -> UserTourPlace | None:
+    route: TourRoute | None = None,
+) -> UserPlaceState | None:
     if route_payload is not None:
-        ensure_user_tour_place_for_stop(
+        ensure_user_place_states_from_route_payload(
             user=user,
-            stop_id=stop_id,
             route_payload=route_payload,
-            saved_route=saved_route,
+            route=route,
+            touch_existing=False,
         )
 
-    user_place = (
-        UserTourPlace.objects.select_related("poi_detail")
-        .filter(user=user, poi_detail__stop_id=stop_id)
+    state = (
+        UserPlaceState.objects.select_related("place", "place__category")
+        .filter(user=user, place__source_ref=stop_id)
         .first()
     )
-    if user_place is None:
+    if state is None:
         return None
 
-    user_place.is_visited = visited
-    user_place.visited_at = timezone.now() if visited else None
-    user_place.save(update_fields=["is_visited", "visited_at", "last_seen_at"])
-    return user_place
+    state.is_visited = visited
+    state.visited_at = timezone.now() if visited else None
+    if route is not None:
+        state.last_seen_route = route
+    state.save(update_fields=["is_visited", "visited_at", "last_seen_route", "last_seen_at"])
+    return state
 
 
 def build_user_place_library(*, user) -> list[dict]:
-    current_saved_route = get_latest_saved_route(user)
+    current_route = get_latest_tour_route(user)
     active_lookup: dict[str, int] = {}
     excluded_ids: set[str] = set()
 
-    if current_saved_route is not None:
-        ensure_user_tour_places_from_route_payload(
+    if current_route is not None:
+        ensure_user_place_states_from_route_payload(
             user=user,
-            route_payload=current_saved_route.cache.route_payload,
-            saved_route=current_saved_route,
+            route_payload=current_route.search_cache.route_payload,
+            route=current_route,
             touch_existing=False,
         )
-        excluded_ids = set(current_saved_route.excluded_stop_ids or [])
-        for place in current_saved_route.route_payload.get("places_to_pass", []):
-            stop_id = place.get("stop_id")
-            waypoint_order = place.get("waypoint_order")
-            if (
-                stop_id
-                and bool(place.get("included_in_route"))
-                and isinstance(waypoint_order, int)
-            ):
-                active_lookup[stop_id] = waypoint_order
+        for stop in current_route.stops.select_related("place").order_by("display_order", "id"):
+            stop_id = stop.place.source_ref or stop.place.slug
+            if stop.state == ROUTE_STOP_STATE_ACTIVE:
+                active_lookup[stop_id] = stop.waypoint_order or stop.display_order
+            elif stop.state == ROUTE_STOP_STATE_EXCLUDED:
+                excluded_ids.add(stop_id)
 
     payloads = []
     queryset = (
-        UserTourPlace.objects.select_related("poi_detail")
+        UserPlaceState.objects.select_related("place", "place__category")
         .filter(user=user)
         .order_by("-last_seen_at", "-id")
     )
-    for user_place in queryset:
-        stop_id = user_place.poi_detail.stop_id
+    for state in queryset:
+        stop_id = state.place.source_ref or state.place.slug
         payloads.append(
             {
                 "stop_id": stop_id,
-                "name": user_place.poi_detail.name,
-                "category": user_place.poi_detail.category,
-                "image_url": user_place.poi_detail.image_url or None,
-                "address": user_place.poi_detail.address,
-                "summary": user_place.poi_detail.summary,
-                "is_visited": user_place.is_visited,
+                "name": state.place.name,
+                "category": state.place.category.slug,
+                "image_url": state.place.primary_image_url,
+                "address": state.place.address,
+                "summary": state.place.summary or state.place.description,
+                "is_visited": state.is_visited,
                 "is_in_current_route": stop_id in active_lookup,
                 "is_excluded_from_current_route": stop_id in excluded_ids,
                 "current_route_order": active_lookup.get(stop_id),
-                "last_seen_at": user_place.last_seen_at,
+                "last_seen_at": state.last_seen_at,
             }
         )
-
     return sorted(payloads, key=_library_sort_key)
 
 
-def sync_saved_route_with_user_places(
+def sync_tour_route_with_user_places(
     *,
-    saved_route: SavedTourRoute,
+    route: TourRoute,
     planner,
     serialize_result,
 ) -> dict:
+    base_route_payload = route.search_cache.route_payload
+    excluded_stop_ids = list(
+        route.stops.filter(state=ROUTE_STOP_STATE_EXCLUDED)
+        .select_related("place")
+        .values_list("place__source_ref", flat=True)
+    )
     visited_stop_ids = get_visited_stop_ids_for_route_payload(
-        user=saved_route.user,
-        route_payload=saved_route.cache.route_payload,
+        user=route.user,
+        route_payload=base_route_payload,
     )
     result, map_payload = planner.rebuild_from_payload(
-        route_payload=saved_route.cache.route_payload,
-        excluded_stop_ids=list(saved_route.excluded_stop_ids or []),
+        route_payload=base_route_payload,
+        excluded_stop_ids=excluded_stop_ids,
         visited_stop_ids=visited_stop_ids,
     )
-    route_payload = serialize_result(
+    current_route_payload = serialize_result(
         result,
         map_payload,
-        saved_route_id=saved_route.id,
+        saved_route_id=route.id,
     )["route"]
     return {
+        "excluded_stop_ids": excluded_stop_ids,
         "visited_stop_ids": visited_stop_ids,
-        "route_payload": route_payload,
+        "route_payload": current_route_payload,
         "map_payload": map_payload,
     }
 

@@ -1,11 +1,8 @@
-import os
-from decouple import config
+from __future__ import annotations
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from pathlib import Path
 
-SECRET_KEY = config("DJANGO_SECRET_KEY")
-DEBUG = config("DJANGO_DEBUG", default=False, cast=bool)
-ALLOWED_HOSTS = config("DJANGO_ALLOWED_HOSTS", default="localhost").split(",")
+BASE_DIR = Path(__file__).resolve().parents[2]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -20,7 +17,6 @@ INSTALLED_APPS = [
     "core",
     "accounts",
     "places",
-    "routes",
     "tickets",
     "tour_routes.apps.TourRoutesConfig",
 ]
@@ -55,17 +51,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "explora_plus.wsgi.application"
-
-DATABASES = {
-    "default": {
-        "ENGINE": "django.contrib.gis.db.backends.postgis",
-        "NAME": config("DB_NAME"),
-        "USER": config("DB_USER"),
-        "PASSWORD": config("DB_PASSWORD"),
-        "HOST": config("DB_HOST", default="db"),
-        "PORT": config("DB_PORT", default="5432"),
-    }
-}
+ASGI_APPLICATION = "explora_plus.asgi.application"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -95,4 +81,3 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^http://localhost(:\d+)?$",
     r"^http://127\.0\.0\.1(:\d+)?$",
 ]
-CORS_ALLOW_ALL_ORIGINS = DEBUG

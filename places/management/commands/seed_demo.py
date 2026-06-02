@@ -5,12 +5,12 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils.text import slugify
 
-from places.models import Category, Place, PlaceImage
+from places.models import Place, PlaceCategory, PlaceImage
 
 CATEGORIES = [
-    {"slug": "monumento", "name": "Monumentos", "icon_name": "location"},
-    {"slug": "evento", "name": "Eventos", "icon_name": "calendar"},
-    {"slug": "transporte", "name": "Transporte", "icon_name": "bus"},
+    {"slug": "culture", "name": "Cultura", "icon_name": "camera"},
+    {"slug": "park", "name": "Parques", "icon_name": "leaf"},
+    {"slug": "food", "name": "Comida", "icon_name": "restaurant"},
 ]
 
 
@@ -21,7 +21,7 @@ def now_plus(days: int) -> datetime:
 PLACES = [
     {
         "slug": "aquario-municipal-santos",
-        "category": "monumento",
+        "category": "culture",
         "name": "Aquário Municipal de Santos",
         "description": (
             "Inaugurado em 1945 na Ponta da Praia, é um dos aquários mais antigos do Brasil. "
@@ -41,7 +41,7 @@ PLACES = [
     },
     {
         "slug": "monte-serrat",
-        "category": "monumento",
+        "category": "culture",
         "name": "Santuário do Monte Serrat",
         "description": (
             "Padroeira da cidade, fica no topo do morro mais alto da região central. "
@@ -61,7 +61,7 @@ PLACES = [
     },
     {
         "slug": "pinacoteca-benedicto-calixto",
-        "category": "monumento",
+        "category": "culture",
         "name": "Pinacoteca Benedicto Calixto",
         "description": (
             "Casarão histórico no centro com acervo permanente do pintor santista Benedicto "
@@ -80,7 +80,7 @@ PLACES = [
     },
     {
         "slug": "orquidario-municipal",
-        "category": "monumento",
+        "category": "park",
         "name": "Orquidário Municipal",
         "description": (
             "Parque urbano com mais de 3.500 orquídeas, mata atlântica preservada, lago com "
@@ -99,7 +99,7 @@ PLACES = [
     },
     {
         "slug": "museu-pele",
-        "category": "monumento",
+        "category": "culture",
         "name": "Museu Pelé",
         "description": (
             "Casarão eclético tombado, restaurado pra abrigar a história do maior jogador "
@@ -118,7 +118,7 @@ PLACES = [
     },
     {
         "slug": "museu-do-cafe",
-        "category": "monumento",
+        "category": "food",
         "name": "Museu do Café",
         "description": (
             "Funciona no prédio da antiga Bolsa Oficial de Café, ícone do auge do ciclo "
@@ -137,7 +137,7 @@ PLACES = [
     },
     {
         "slug": "catedral-de-santos",
-        "category": "monumento",
+        "category": "culture",
         "name": "Catedral de Santos",
         "description": (
             "Igreja matriz de estilo neogótico, com vitrais coloridos e a maior nave da "
@@ -156,7 +156,7 @@ PLACES = [
     },
     {
         "slug": "bonde-turistico-santos",
-        "category": "transporte",
+        "category": "culture",
         "name": "Bonde Turístico de Santos",
         "description": (
             "Bondes antigos restaurados que fazem um circuito de cerca de 1,7 km pelo "
@@ -175,7 +175,7 @@ PLACES = [
     },
     {
         "slug": "festival-do-cafe",
-        "category": "evento",
+        "category": "food",
         "name": "Festival do Café Santista",
         "description": (
             "Festival anual no Museu do Café reunindo torrefadores, baristas, produtores "
@@ -196,7 +196,7 @@ PLACES = [
     },
     {
         "slug": "mostra-verao-pinacoteca",
-        "category": "evento",
+        "category": "culture",
         "name": "Mostra de Verão da Pinacoteca",
         "description": (
             "Mostra coletiva anual da Pinacoteca Benedicto Calixto trazendo artistas "
@@ -235,9 +235,9 @@ class Command(BaseCommand):
             PlaceImage.objects.all().delete()
             Place.objects.all().delete()
 
-        cats_by_slug: dict[str, Category] = {}
+        cats_by_slug: dict[str, PlaceCategory] = {}
         for c in CATEGORIES:
-            obj, created = Category.objects.update_or_create(
+            obj, created = PlaceCategory.objects.update_or_create(
                 slug=c["slug"], defaults={"name": c["name"], "icon_name": c["icon_name"]}
             )
             cats_by_slug[c["slug"]] = obj
@@ -254,7 +254,10 @@ class Command(BaseCommand):
                     "description": p["description"],
                     "location": Point(p["lng"], p["lat"], srid=4326),
                     "address": p["address"],
-                    "hours_open": p["hours_open"],
+                    "opening_hours": p["hours_open"],
+                    "summary": p["description"],
+                    "source": "curated",
+                    "is_curated": True,
                     "price_cents": p["price_cents"],
                     "currency": "BRL",
                     "event_start_at": p.get("event_start_at"),

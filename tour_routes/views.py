@@ -5,42 +5,39 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .constants import (
-    TOUR_ROUTE_DETAIL_STATUS_PENDING,
-    TOUR_ROUTE_STOP_STATE_VISITED,
-)
+from core.domain import DETAIL_STATUS_PENDING, ROUTE_STOP_STATE_EXCLUDED, ROUTE_STOP_STATE_VISITED
+from places.catalog import upsert_places_from_route_payload, upsert_places_from_route_pois
+from places.models import Place
 from .authentication import OptionalJWTAuthentication
-from .models import SavedTourRoute, TourRouteCache, TourRoutePoiDetail
+from .models import RouteSearchCache, TourRoute
 from .persistence import (
     build_search_cache_key,
     bump_cache_hit,
     clone_response_payload,
     create_or_update_cache,
-    create_saved_route,
-    upsert_poi_detail_stubs,
-    upsert_poi_detail_stubs_from_route_payload,
-    update_saved_route_snapshot,
-    with_saved_route_id,
+    create_tour_route,
+    update_tour_route_snapshot,
 )
 from .serializers import (
     SavedTourRouteStopStateSerializer,
     TourRouteRequestSerializer,
-    serialize_poi_detail,
-    serialize_result,
-    serialize_user_places,
     UserTourPlaceSerializer,
     UserTourPlaceVisitedSerializer,
+    serialize_poi_detail,
+    serialize_result,
+    serialize_route_model,
+    serialize_user_places,
 )
 from .services.exceptions import TourRouteError
 from .services.poi_details import build_poi_detail_fetcher
 from .services.planner import build_default_planner
 from .user_places import (
     build_user_place_library,
-    ensure_user_tour_places_from_route_payload,
-    get_latest_saved_route,
+    ensure_user_place_states_from_route_payload,
+    get_latest_tour_route,
     get_visited_stop_ids_for_route_payload,
-    set_user_tour_place_visited,
-    sync_saved_route_with_user_places,
+    set_user_place_visited,
+    sync_tour_route_with_user_places,
 )
 
 
@@ -58,7 +55,7 @@ class TourRouteView(APIView):
             origin_input=origin_input,
             destination_input=destination_input,
         )
-        cache = TourRouteCache.objects.filter(cache_key=cache_key).first()
+        cache = RouteSearchCache.objects.filter(cache_key=cache_key).first()
 
         if cache is None or _should_refresh_cache(cache):
             planner = build_default_planner()
@@ -70,79 +67,72 @@ class TourRouteView(APIView):
             except TourRouteError as exc:
                 return Response({"detail": str(exc)}, status=exc.status_code)
 
-            response_payload = serialize_result(result, map_payload, saved_route_id=None)
-            upsert_poi_detail_stubs(result.places_to_pass)
+            base_response_payload = serialize_result(result, map_payload, saved_route_id=None)
+            upsert_places_from_route_pois(result.places_to_pass)
             cache = create_or_update_cache(
                 cache_key=cache_key,
                 canonical_payload=canonical_payload,
                 origin_query=_endpoint_query(origin_input),
                 destination_query=_endpoint_query(destination_input),
-                route_payload=response_payload["route"],
-                map_payload=response_payload["map"],
+                route_payload=base_response_payload["route"],
+                map_payload=base_response_payload["map"],
             )
         else:
             bump_cache_hit(cache)
-            response_payload = clone_response_payload(
-                cache.route_payload,
-                cache.map_payload,
-            )
-            upsert_poi_detail_stubs_from_route_payload(response_payload["route"])
+            base_response_payload = clone_response_payload(cache.route_payload, cache.map_payload)
+            upsert_places_from_route_payload(base_response_payload["route"])
 
         if request.user.is_authenticated:
             visited_stop_ids = get_visited_stop_ids_for_route_payload(
                 user=request.user,
-                route_payload=response_payload["route"],
+                route_payload=base_response_payload["route"],
             )
+            current_response_payload = base_response_payload
             if visited_stop_ids:
                 planner = build_default_planner()
                 try:
                     result, map_payload = planner.rebuild_from_payload(
-                        route_payload=response_payload["route"],
+                        route_payload=base_response_payload["route"],
                         visited_stop_ids=visited_stop_ids,
                     )
                 except TourRouteError as exc:
                     return Response({"detail": str(exc)}, status=exc.status_code)
-                response_payload = serialize_result(
+                current_response_payload = serialize_result(
                     result,
                     map_payload,
                     saved_route_id=None,
                 )
-                upsert_poi_detail_stubs_from_route_payload(response_payload["route"])
 
-            saved_route = create_saved_route(
+            route = create_tour_route(
                 user=request.user,
-                cache=cache,
+                search_cache=cache,
                 origin_query=_endpoint_query(origin_input),
                 destination_query=_endpoint_query(destination_input),
-                route_payload=response_payload["route"],
-                map_payload=response_payload["map"],
+                base_route_payload=base_response_payload["route"],
+                current_route_payload=current_response_payload["route"],
                 visited_stop_ids=visited_stop_ids,
             )
-            ensure_user_tour_places_from_route_payload(
+            ensure_user_place_states_from_route_payload(
                 user=request.user,
-                route_payload=response_payload["route"],
-                saved_route=saved_route,
+                route_payload=base_response_payload["route"],
+                route=route,
             )
-            response_payload = with_saved_route_id(
-                response_payload["route"],
-                response_payload["map"],
-                saved_route.id,
-            )
+            return Response(serialize_route_model(route))
 
-        return Response(response_payload)
+        return Response(base_response_payload)
 
 
 class SavedTourRouteStopDeleteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, route_id: int, stop_id: str):
-        saved_route = get_object_or_404(
-            SavedTourRoute.objects.select_related("cache"),
+        route = get_object_or_404(
+            TourRoute.objects.select_related("search_cache"),
             id=route_id,
             user=request.user,
         )
 
-        base_route_payload = saved_route.cache.route_payload
+        base_route_payload = route.search_cache.route_payload
         all_stop_ids = {
             place.get("stop_id")
             for place in base_route_payload.get("places_to_pass", [])
@@ -150,22 +140,18 @@ class SavedTourRouteStopDeleteView(APIView):
         if stop_id not in all_stop_ids:
             return Response({"detail": "Parada nao encontrada nesta rota."}, status=404)
 
-        excluded_stop_ids = list(saved_route.excluded_stop_ids or [])
-        visited_stop_ids = [
-            current_stop_id
-            for current_stop_id in (saved_route.visited_stop_ids or [])
-            if current_stop_id != stop_id
-        ]
+        excluded_stop_ids = list(
+            route.stops.filter(state=ROUTE_STOP_STATE_EXCLUDED)
+            .values_list("place__source_ref", flat=True)
+        )
         if stop_id in excluded_stop_ids:
-            return Response(
-                with_saved_route_id(
-                    saved_route.route_payload,
-                    saved_route.map_payload,
-                    saved_route.id,
-                )
-            )
+            return Response(serialize_route_model(route))
 
         excluded_stop_ids.append(stop_id)
+        visited_stop_ids = get_visited_stop_ids_for_route_payload(
+            user=request.user,
+            route_payload=base_route_payload,
+        )
 
         planner = build_default_planner()
         try:
@@ -177,18 +163,25 @@ class SavedTourRouteStopDeleteView(APIView):
         except TourRouteError as exc:
             return Response({"detail": str(exc)}, status=exc.status_code)
 
-        response_payload = update_saved_route_snapshot(
-            saved_route=saved_route,
+        current_route_payload = serialize_result(
+            result,
+            map_payload,
+            saved_route_id=route.id,
+        )["route"]
+        update_tour_route_snapshot(
+            route=route,
+            base_route_payload=base_route_payload,
+            current_route_payload=current_route_payload,
             excluded_stop_ids=excluded_stop_ids,
             visited_stop_ids=visited_stop_ids,
-            route_payload=serialize_result(
-                result,
-                map_payload,
-                saved_route_id=saved_route.id,
-            )["route"],
-            map_payload=map_payload,
         )
-        return Response(response_payload)
+        ensure_user_place_states_from_route_payload(
+            user=request.user,
+            route_payload=base_route_payload,
+            route=route,
+            touch_existing=False,
+        )
+        return Response(serialize_route_model(route))
 
 
 class SavedTourRouteStopStateView(APIView):
@@ -198,13 +191,12 @@ class SavedTourRouteStopStateView(APIView):
         serializer = SavedTourRouteStopStateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        saved_route = get_object_or_404(
-            SavedTourRoute.objects.select_related("cache"),
+        route = get_object_or_404(
+            TourRoute.objects.select_related("search_cache"),
             id=route_id,
             user=request.user,
         )
-
-        base_route_payload = saved_route.cache.route_payload
+        base_route_payload = route.search_cache.route_payload
         all_stop_ids = {
             place.get("stop_id")
             for place in base_route_payload.get("places_to_pass", [])
@@ -212,66 +204,65 @@ class SavedTourRouteStopStateView(APIView):
         if stop_id not in all_stop_ids:
             return Response({"detail": "Parada nao encontrada nesta rota."}, status=404)
 
-        excluded_stop_ids = list(saved_route.excluded_stop_ids or [])
+        excluded_stop_ids = list(
+            route.stops.filter(state=ROUTE_STOP_STATE_EXCLUDED)
+            .values_list("place__source_ref", flat=True)
+        )
         if stop_id in excluded_stop_ids:
             return Response({"detail": "Parada removida da rota."}, status=404)
 
-        next_state = serializer.validated_data["state"]
-        wants_visited = next_state == TOUR_ROUTE_STOP_STATE_VISITED
-        user_place = set_user_tour_place_visited(
+        wants_visited = serializer.validated_data["state"] == TOUR_ROUTE_STOP_STATE_VISITED
+        state = set_user_place_visited(
             user=request.user,
             stop_id=stop_id,
             visited=wants_visited,
             route_payload=base_route_payload,
-            saved_route=saved_route,
+            route=route,
         )
-        if user_place is None:
+        if state is None:
             return Response({"detail": "Lugar nao encontrado na biblioteca."}, status=404)
 
         planner = build_default_planner()
         try:
-            sync_payload = sync_saved_route_with_user_places(
-                saved_route=saved_route,
+            sync_payload = sync_tour_route_with_user_places(
+                route=route,
                 planner=planner,
                 serialize_result=serialize_result,
             )
         except TourRouteError as exc:
             return Response({"detail": str(exc)}, status=exc.status_code)
 
-        response_payload = update_saved_route_snapshot(
-            saved_route=saved_route,
-            excluded_stop_ids=excluded_stop_ids,
+        update_tour_route_snapshot(
+            route=route,
+            base_route_payload=base_route_payload,
+            current_route_payload=sync_payload["route_payload"],
+            excluded_stop_ids=sync_payload["excluded_stop_ids"],
             visited_stop_ids=sync_payload["visited_stop_ids"],
-            route_payload=sync_payload["route_payload"],
-            map_payload=sync_payload["map_payload"],
         )
-        return Response(response_payload)
+        return Response(serialize_route_model(route))
 
 
 class TourRoutePoiDetailView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, stop_id: str):
-        poi_detail = get_object_or_404(TourRoutePoiDetail, stop_id=stop_id)
-        if _should_fetch_poi_detail(poi_detail):
-            poi_detail = build_poi_detail_fetcher().hydrate(poi_detail)
-        return Response(serialize_poi_detail(poi_detail))
+        place = get_object_or_404(
+            Place.objects.select_related("category").prefetch_related("images"),
+            source_ref=stop_id,
+        )
+        if _should_fetch_poi_detail(place):
+            place = build_poi_detail_fetcher().hydrate(place)
+        return Response(serialize_poi_detail(place))
 
 
 class CurrentTourRouteView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        saved_route = get_latest_saved_route(request.user)
-        if saved_route is None:
+        route = get_latest_tour_route(request.user)
+        if route is None:
             return Response({"detail": "Nenhuma rota atual salva."}, status=404)
-        return Response(
-            with_saved_route_id(
-                saved_route.route_payload,
-                saved_route.map_payload,
-                saved_route.id,
-            )
-        )
+        return Response(serialize_route_model(route))
 
 
 class UserTourPlaceListView(APIView):
@@ -289,41 +280,39 @@ class UserTourPlaceVisitedView(APIView):
         serializer = UserTourPlaceVisitedSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        current_saved_route = get_latest_saved_route(request.user)
-        route_payload = (
-            current_saved_route.cache.route_payload if current_saved_route is not None else None
-        )
-        user_place = set_user_tour_place_visited(
+        route = get_latest_tour_route(request.user)
+        route_payload = route.search_cache.route_payload if route is not None else None
+        state = set_user_place_visited(
             user=request.user,
             stop_id=stop_id,
             visited=serializer.validated_data["visited"],
             route_payload=route_payload,
-            saved_route=current_saved_route,
+            route=route,
         )
-        if user_place is None:
+        if state is None:
             return Response({"detail": "Lugar nao encontrado na biblioteca."}, status=404)
 
-        if current_saved_route is not None:
+        if route is not None:
             all_stop_ids = {
                 place.get("stop_id")
-                for place in current_saved_route.cache.route_payload.get("places_to_pass", [])
+                for place in route.search_cache.route_payload.get("places_to_pass", [])
             }
             if stop_id in all_stop_ids:
                 planner = build_default_planner()
                 try:
-                    sync_payload = sync_saved_route_with_user_places(
-                        saved_route=current_saved_route,
+                    sync_payload = sync_tour_route_with_user_places(
+                        route=route,
                         planner=planner,
                         serialize_result=serialize_result,
                     )
                 except TourRouteError as exc:
                     return Response({"detail": str(exc)}, status=exc.status_code)
-                update_saved_route_snapshot(
-                    saved_route=current_saved_route,
-                    excluded_stop_ids=list(current_saved_route.excluded_stop_ids or []),
+                update_tour_route_snapshot(
+                    route=route,
+                    base_route_payload=route.search_cache.route_payload,
+                    current_route_payload=sync_payload["route_payload"],
+                    excluded_stop_ids=sync_payload["excluded_stop_ids"],
                     visited_stop_ids=sync_payload["visited_stop_ids"],
-                    route_payload=sync_payload["route_payload"],
-                    map_payload=sync_payload["map_payload"],
                 )
 
         payload = build_user_place_library(user=request.user)
@@ -342,25 +331,25 @@ def _endpoint_query(endpoint_input: dict) -> str:
     return f'{float(location["lat"]):.6f},{float(location["lng"]):.6f}'
 
 
-def _should_refresh_cache(cache: TourRouteCache) -> bool:
+def _should_refresh_cache(cache: RouteSearchCache) -> bool:
     route_payload = cache.route_payload or {}
     places = route_payload.get("places_to_pass") or []
     mode = route_payload.get("mode")
     return mode == "direct_fallback" or len(places) == 0
 
 
-def _should_fetch_poi_detail(poi_detail: TourRoutePoiDetail) -> bool:
-    if poi_detail.details_fetched_at is None:
+def _should_fetch_poi_detail(place) -> bool:
+    if place.details_fetched_at is None:
         return True
-    if poi_detail.detail_status == TOUR_ROUTE_DETAIL_STATUS_PENDING:
+    if place.detail_status == DETAIL_STATUS_PENDING:
         return True
     return not any(
         [
-            poi_detail.address,
-            poi_detail.summary,
-            poi_detail.image_url,
-            poi_detail.source_url,
-            poi_detail.website,
-            poi_detail.opening_hours,
+            place.address,
+            place.summary,
+            place.primary_image_url,
+            place.source_url,
+            place.website,
+            place.opening_hours,
         ]
     )

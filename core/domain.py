@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+PLACE_CATEGORY_CULTURE = "culture"
+PLACE_CATEGORY_PARK = "park"
+PLACE_CATEGORY_FOOD = "food"
+
+PLACE_CATEGORY_CHOICES = (
+    (PLACE_CATEGORY_CULTURE, "Cultura"),
+    (PLACE_CATEGORY_PARK, "Parques"),
+    (PLACE_CATEGORY_FOOD, "Comida"),
+)
+
+PLACE_CATEGORY_PRIORITY = {
+    PLACE_CATEGORY_CULTURE: 0,
+    PLACE_CATEGORY_PARK: 1,
+    PLACE_CATEGORY_FOOD: 2,
+}
+
+PLACE_CATEGORY_DEFAULTS = {
+    PLACE_CATEGORY_CULTURE: {"name": "Cultura", "icon_name": "camera"},
+    PLACE_CATEGORY_PARK: {"name": "Parques", "icon_name": "leaf"},
+    PLACE_CATEGORY_FOOD: {"name": "Comida", "icon_name": "restaurant"},
+}
+
+PLACE_SOURCE_CURATED = "curated"
+PLACE_SOURCE_OVERPASS = "overpass"
+PLACE_SOURCE_CACHE = "cache"
+
+PLACE_SOURCE_CHOICES = (
+    (PLACE_SOURCE_CURATED, "Curated"),
+    (PLACE_SOURCE_OVERPASS, "Overpass"),
+    (PLACE_SOURCE_CACHE, "Cache"),
+)
+
+ROUTE_MODE_TOUR = "tour"
+ROUTE_MODE_DIRECT_FALLBACK = "direct_fallback"
+
+ROUTE_STOP_STATE_ACTIVE = "active"
+ROUTE_STOP_STATE_VISITED = "visited"
+ROUTE_STOP_STATE_EXCLUDED = "excluded"
+
+ROUTE_STOP_STATE_CHOICES = (
+    (ROUTE_STOP_STATE_ACTIVE, "Active"),
+    (ROUTE_STOP_STATE_VISITED, "Visited"),
+    (ROUTE_STOP_STATE_EXCLUDED, "Excluded"),
+)
+
+ROUTE_STOP_STATES_PUBLIC = (
+    ROUTE_STOP_STATE_ACTIVE,
+    ROUTE_STOP_STATE_VISITED,
+)
+
+DETAIL_STATUS_PENDING = "pending"
+DETAIL_STATUS_COMPLETE = "complete"
+DETAIL_STATUS_UNAVAILABLE = "unavailable"
+DETAIL_STATUS_ERROR = "error"

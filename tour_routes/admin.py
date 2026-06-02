@@ -1,10 +1,24 @@
 from django.contrib import admin
 
-from .models import SavedTourRoute, TourRouteCache, TourRoutePoiDetail, UserTourPlace
+from .models import RouteSearchCache, TourRoute, TourRouteStop
 
 
-@admin.register(TourRouteCache)
-class TourRouteCacheAdmin(admin.ModelAdmin):
+class TourRouteStopInline(admin.TabularInline):
+    model = TourRouteStop
+    extra = 0
+    fields = (
+        "place",
+        "display_order",
+        "waypoint_order",
+        "state",
+        "source",
+        "distance_from_route_m",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(RouteSearchCache)
+class RouteSearchCacheAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "origin_query",
@@ -16,12 +30,13 @@ class TourRouteCacheAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at", "updated_at")
 
 
-@admin.register(SavedTourRoute)
-class SavedTourRouteAdmin(admin.ModelAdmin):
+@admin.register(TourRoute)
+class TourRouteAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "user",
         "destination_label",
+        "mode",
         "distance_m",
         "duration_s",
         "created_at",
@@ -34,29 +49,23 @@ class SavedTourRouteAdmin(admin.ModelAdmin):
         "destination_label",
     )
     readonly_fields = ("created_at", "updated_at")
+    inlines = [TourRouteStopInline]
 
 
-@admin.register(TourRoutePoiDetail)
-class TourRoutePoiDetailAdmin(admin.ModelAdmin):
+@admin.register(TourRouteStop)
+class TourRouteStopAdmin(admin.ModelAdmin):
     list_display = (
-        "stop_id",
-        "name",
-        "category",
-        "detail_status",
-        "updated_at",
+        "route",
+        "place",
+        "display_order",
+        "waypoint_order",
+        "state",
+        "distance_from_route_m",
     )
-    search_fields = ("stop_id", "name", "wikidata_id", "wikipedia_title")
-    readonly_fields = ("created_at", "updated_at", "details_fetched_at")
-
-
-@admin.register(UserTourPlace)
-class UserTourPlaceAdmin(admin.ModelAdmin):
-    list_display = (
-        "user",
-        "poi_detail",
-        "is_visited",
-        "seen_count",
-        "last_seen_at",
+    list_filter = ("state", "source")
+    search_fields = (
+        "route__user__username",
+        "place__name",
+        "place__source_ref",
     )
-    search_fields = ("user__username", "poi_detail__name", "poi_detail__stop_id")
-    readonly_fields = ("first_seen_at", "last_seen_at", "visited_at")
+    readonly_fields = ("created_at", "updated_at")

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from places.models import Place
+
 from .constants import TOUR_ROUTE_STOP_STATES
-from .models import TourRoutePoiDetail
-from .types import GeoPoint, TourRouteResult
+from .models import TourRoute
+from .services.map_builder import GeoJsonMapBuilder
+from .types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
 
 
 class CoordinateSerializer(serializers.Serializer):
@@ -77,27 +80,16 @@ class SavedTourRouteStopStateSerializer(serializers.Serializer):
     state = serializers.ChoiceField(choices=TOUR_ROUTE_STOP_STATES)
 
 
-class TourRoutePoiDetailSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = TourRoutePoiDetail
-        fields = (
-            "stop_id",
-            "name",
-            "category",
-            "address",
-            "summary",
-            "image_url",
-            "source_url",
-            "opening_hours",
-            "website",
-        )
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        for field_name in ("image_url", "source_url", "opening_hours", "website"):
-            if data.get(field_name) == "":
-                data[field_name] = None
-        return data
+class TourRoutePoiDetailSerializer(serializers.Serializer):
+    stop_id = serializers.CharField()
+    name = serializers.CharField()
+    category = serializers.CharField()
+    address = serializers.CharField(allow_blank=True)
+    summary = serializers.CharField(allow_blank=True)
+    image_url = serializers.URLField(allow_null=True)
+    source_url = serializers.URLField(allow_null=True)
+    opening_hours = serializers.CharField(allow_null=True)
+    website = serializers.URLField(allow_null=True)
 
 
 class UserTourPlaceSerializer(serializers.Serializer):
@@ -169,9 +161,104 @@ def serialize_result(
     return TourRouteResponseSerializer(instance=payload).data
 
 
-def serialize_poi_detail(poi_detail: TourRoutePoiDetail) -> dict:
-    return TourRoutePoiDetailSerializer(instance=poi_detail).data
+def serialize_route_model(route: TourRoute) -> dict:
+    result = _result_from_route(route)
+    return serialize_result(
+        result,
+        GeoJsonMapBuilder().build(result),
+        saved_route_id=route.id,
+    )
+
+
+def serialize_poi_detail(place: Place) -> dict:
+    payload = {
+        "stop_id": place.source_ref or place.slug,
+        "name": place.name,
+        "category": place.category.slug,
+        "address": place.address,
+        "summary": place.summary or place.description,
+        "image_url": place.primary_image_url,
+        "source_url": place.source_url or None,
+        "opening_hours": place.opening_hours or None,
+        "website": place.website or None,
+    }
+    return TourRoutePoiDetailSerializer(instance=payload).data
 
 
 def serialize_user_places(items: list[dict]) -> list[dict]:
     return UserTourPlaceSerializer(instance=items, many=True).data
+
+
+def _result_from_route(route: TourRoute) -> TourRouteResult:
+    stops = list(
+        route.stops.select_related("place", "place__category")
+        .exclude(state="excluded")
+        .order_by("display_order", "id")
+    )
+    direct_route_path = _route_path_from_geometry(
+        route.direct_route_geometry,
+        distance_m=route.direct_distance_m,
+        duration_s=route.direct_duration_s,
+    )
+    active_route_path = _route_path_from_geometry(
+        route.route_geometry or route.direct_route_geometry,
+        distance_m=route.distance_m,
+        duration_s=route.duration_s,
+    )
+    tour_route_path = active_route_path if route.mode == "tour" else None
+    return TourRouteResult(
+        origin=ResolvedPoint(
+            label=route.origin_label,
+            location=_geo_point_from_geometry(route.origin_location),
+        ),
+        destination=ResolvedPoint(
+            label=route.destination_label,
+            location=_geo_point_from_geometry(route.destination_location),
+        ),
+        route_path=active_route_path,
+        direct_route_path=direct_route_path,
+        tour_route_path=tour_route_path,
+        mode=route.mode,
+        places_to_pass=[_poi_from_stop(stop) for stop in stops],
+    )
+
+
+def _route_path_from_geometry(geometry, *, distance_m: int, duration_s: int) -> RoutePath:
+    coordinates = []
+    if geometry is not None:
+        for lng, lat in geometry.coords:
+            coordinates.append(GeoPoint(lat=float(lat), lng=float(lng)))
+    return RoutePath(
+        distance_m=int(distance_m),
+        duration_s=int(duration_s),
+        coordinates=coordinates,
+    )
+
+
+def _geo_point_from_geometry(point_geometry) -> GeoPoint:
+    return GeoPoint(lat=float(point_geometry.y), lng=float(point_geometry.x))
+
+
+def _poi_from_stop(stop) -> RoutePoi:
+    place = stop.place
+    return RoutePoi(
+        stop_id=place.source_ref or place.slug,
+        name=place.name,
+        category=place.category.slug,
+        source=stop.source or place.source,
+        location=_geo_point_from_geometry(place.location),
+        distance_from_route_m=float(stop.distance_from_route_m),
+        progress_m=0.0,
+        priority=0,
+        included_in_route=stop.state == "active",
+        waypoint_order=stop.waypoint_order if stop.state == "active" else None,
+        state=stop.state,
+        osm_type=place.osm_type or None,
+        osm_id=place.osm_id,
+        wikidata_id=place.wikidata_id or None,
+        wikipedia_title=place.wikipedia_title or None,
+        website=place.website or None,
+        opening_hours=place.opening_hours or None,
+        address=place.address or None,
+        raw_tags=((place.raw_payload or {}).get("tags") or None),
+    )
