@@ -5,12 +5,9 @@ from urllib.parse import quote
 
 from django.utils import timezone
 
-from tour_routes.constants import (
-    TOUR_ROUTE_DETAIL_STATUS_COMPLETE,
-    TOUR_ROUTE_DETAIL_STATUS_ERROR,
-    TOUR_ROUTE_DETAIL_STATUS_UNAVAILABLE,
-)
-from tour_routes.models import TourRoutePoiDetail
+from core.domain import DETAIL_STATUS_COMPLETE, DETAIL_STATUS_ERROR, DETAIL_STATUS_UNAVAILABLE
+from places.catalog import ensure_place_primary_image
+from places.models import Place
 
 from .http import JsonHttpClient
 
@@ -23,30 +20,25 @@ class TourRoutePoiDetailFetcher:
     def __init__(self, client: JsonHttpClient | None = None):
         self.client = client or JsonHttpClient()
 
-    def hydrate(self, poi_detail: TourRoutePoiDetail) -> TourRoutePoiDetail:
-        raw_payload = dict(poi_detail.raw_payload or {})
-        address = poi_detail.address
-        summary = poi_detail.summary
-        image_url = poi_detail.image_url
-        source_url = poi_detail.source_url or poi_detail.website
-        website = poi_detail.website
-        opening_hours = poi_detail.opening_hours
-        wikipedia_title = poi_detail.wikipedia_title
-        wikidata_id = poi_detail.wikidata_id
+    def hydrate(self, place: Place) -> Place:
+        raw_payload = dict(place.raw_payload or {})
+        address = place.address
+        summary = place.summary
+        image_url = place.primary_image_url
+        source_url = place.source_url or place.website
+        website = place.website
+        opening_hours = place.opening_hours
+        wikipedia_title = place.wikipedia_title
+        wikidata_id = place.wikidata_id
 
         try:
-            lookup_payload = self._fetch_lookup_payload(poi_detail)
+            lookup_payload = self._fetch_lookup_payload(place)
             if lookup_payload:
                 raw_payload["nominatim"] = lookup_payload
                 address = address or lookup_payload.get("display_name") or ""
-                source_url = source_url or self._build_osm_url(
-                    poi_detail.osm_type,
-                    poi_detail.osm_id,
-                )
+                source_url = source_url or self._build_osm_url(place.osm_type, place.osm_id)
                 extratags = lookup_payload.get("extratags") or {}
-                website = website or extratags.get("website") or extratags.get(
-                    "contact:website"
-                )
+                website = website or extratags.get("website") or extratags.get("contact:website")
                 opening_hours = opening_hours or extratags.get("opening_hours")
                 wikipedia_title = wikipedia_title or self._normalize_wikipedia_title(
                     extratags.get("wikipedia")
@@ -66,42 +58,39 @@ class TourRoutePoiDetailFetcher:
                 raw_payload["wikipedia_summary"] = summary_payload
                 summary = summary or summary_payload.get("extract") or ""
                 image_url = image_url or self._extract_summary_image(summary_payload)
-                source_url = source_url or self._extract_summary_source_url(
-                    summary_payload
-                )
+                source_url = source_url or self._extract_summary_source_url(summary_payload)
 
-            poi_detail.address = address or ""
-            poi_detail.summary = summary or ""
-            poi_detail.image_url = image_url or ""
-            poi_detail.source_url = source_url or ""
-            poi_detail.website = website or ""
-            poi_detail.opening_hours = opening_hours or ""
-            poi_detail.wikipedia_title = wikipedia_title or ""
-            poi_detail.wikidata_id = wikidata_id or ""
-            poi_detail.raw_payload = raw_payload
-            poi_detail.detail_status = (
-                TOUR_ROUTE_DETAIL_STATUS_COMPLETE
+            place.address = address or ""
+            place.summary = summary or ""
+            place.source_url = source_url or ""
+            place.website = website or ""
+            place.opening_hours = opening_hours or ""
+            place.wikipedia_title = wikipedia_title or ""
+            place.wikidata_id = wikidata_id or ""
+            place.raw_payload = raw_payload
+            place.detail_status = (
+                DETAIL_STATUS_COMPLETE
                 if any(
                     [
-                        poi_detail.address,
-                        poi_detail.summary,
-                        poi_detail.image_url,
-                        poi_detail.source_url,
-                        poi_detail.website,
-                        poi_detail.opening_hours,
+                        place.address,
+                        place.summary,
+                        image_url,
+                        place.source_url,
+                        place.website,
+                        place.opening_hours,
                     ]
                 )
-                else TOUR_ROUTE_DETAIL_STATUS_UNAVAILABLE
+                else DETAIL_STATUS_UNAVAILABLE
             )
+            ensure_place_primary_image(place, image_url)
         except (HTTPError, URLError, TimeoutError, ValueError):
-            poi_detail.detail_status = TOUR_ROUTE_DETAIL_STATUS_ERROR
+            place.detail_status = DETAIL_STATUS_ERROR
         finally:
-            poi_detail.details_fetched_at = timezone.now()
-            poi_detail.save(
+            place.details_fetched_at = timezone.now()
+            place.save(
                 update_fields=[
                     "address",
                     "summary",
-                    "image_url",
                     "source_url",
                     "website",
                     "opening_hours",
@@ -114,13 +103,13 @@ class TourRoutePoiDetailFetcher:
                 ]
             )
 
-        return poi_detail
+        return place
 
-    def _fetch_lookup_payload(self, poi_detail: TourRoutePoiDetail) -> dict | None:
-        if not poi_detail.osm_type or poi_detail.osm_id is None:
+    def _fetch_lookup_payload(self, place: Place) -> dict | None:
+        if not place.osm_type or place.osm_id is None:
             return None
 
-        osm_prefix = self._osm_lookup_prefix(poi_detail.osm_type)
+        osm_prefix = self._osm_lookup_prefix(place.osm_type)
         if osm_prefix is None:
             return None
 
@@ -131,7 +120,7 @@ class TourRoutePoiDetailFetcher:
                 "addressdetails": "1",
                 "extratags": "1",
                 "namedetails": "1",
-                "osm_ids": f"{osm_prefix}{poi_detail.osm_id}",
+                "osm_ids": f"{osm_prefix}{place.osm_id}",
             },
             timeout=12.0,
         )
@@ -162,11 +151,9 @@ class TourRoutePoiDetailFetcher:
     def _fetch_wikipedia_summary(self, wikipedia_title: str | None) -> dict | None:
         if not wikipedia_title:
             return None
-
         lang, title = self._split_wikipedia_title(wikipedia_title)
         if not title:
             return None
-
         return self.client.get_json(
             self.wikipedia_summary_url.format(lang=lang, title=quote(title)),
             timeout=12.0,
@@ -186,12 +173,7 @@ class TourRoutePoiDetailFetcher:
         image_claims = claims.get("P18") or []
         if not image_claims:
             return None
-        filename = (
-            image_claims[0]
-            .get("mainsnak", {})
-            .get("datavalue", {})
-            .get("value")
-        )
+        filename = image_claims[0].get("mainsnak", {}).get("datavalue", {}).get("value")
         if not filename:
             return None
         return (

@@ -4,7 +4,7 @@ import sys
 
 
 def main():
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "explora_plus.settings")
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "explora_plus.settings.docker")
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

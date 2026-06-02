@@ -4,7 +4,12 @@ import copy
 import hashlib
 import json
 
-from .models import SavedTourRoute, TourRouteCache, TourRoutePoiDetail
+from django.contrib.gis.geos import LineString, Point
+
+from core.domain import ROUTE_STOP_STATE_ACTIVE, ROUTE_STOP_STATE_EXCLUDED, ROUTE_STOP_STATE_VISITED
+from places.catalog import upsert_places_from_route_payload
+
+from .models import RouteSearchCache, TourRoute, TourRouteStop
 
 
 def build_search_cache_key(*, origin_input: dict, destination_input: dict) -> tuple[str, dict]:
@@ -41,8 +46,8 @@ def create_or_update_cache(
     destination_query: str,
     route_payload: dict,
     map_payload: dict,
-) -> TourRouteCache:
-    cache, created = TourRouteCache.objects.get_or_create(
+) -> RouteSearchCache:
+    cache, created = RouteSearchCache.objects.get_or_create(
         cache_key=cache_key,
         defaults={
             "origin_query": origin_query,
@@ -74,173 +79,170 @@ def create_or_update_cache(
     return cache
 
 
-def bump_cache_hit(cache: TourRouteCache) -> None:
+def bump_cache_hit(cache: RouteSearchCache) -> None:
     cache.hit_count += 1
     cache.save(update_fields=["hit_count", "updated_at"])
 
 
-def create_saved_route(
+def create_tour_route(
     *,
     user,
-    cache: TourRouteCache,
+    search_cache: RouteSearchCache,
     origin_query: str,
     destination_query: str,
-    route_payload: dict,
-    map_payload: dict,
+    base_route_payload: dict,
+    current_route_payload: dict,
+    excluded_stop_ids: list[str] | None = None,
     visited_stop_ids: list[str] | None = None,
-) -> SavedTourRoute:
-    saved_route = SavedTourRoute.objects.create(
+) -> TourRoute:
+    route = TourRoute.objects.create(
         user=user,
-        cache=cache,
+        search_cache=search_cache,
         origin_query=origin_query,
         destination_query=destination_query,
-        origin_label=route_payload["origin"]["label"],
-        destination_label=route_payload["destination"]["label"],
-        visited_stop_ids=list(visited_stop_ids or []),
-        distance_m=int(route_payload["distance_m"]),
-        duration_s=int(route_payload["duration_s"]),
+        origin_label=current_route_payload["origin"]["label"],
+        destination_label=current_route_payload["destination"]["label"],
+        origin_location=_point_from_payload(current_route_payload["origin"]["location"]),
+        destination_location=_point_from_payload(
+            current_route_payload["destination"]["location"]
+        ),
+        mode=current_route_payload["mode"],
+        distance_m=int(current_route_payload["distance_m"]),
+        duration_s=int(current_route_payload["duration_s"]),
+        direct_distance_m=int(current_route_payload["direct_route"]["distance_m"]),
+        direct_duration_s=int(current_route_payload["direct_route"]["duration_s"]),
+        route_geometry=_line_string_from_points(
+            current_route_payload.get("polyline_points", [])
+        ),
+        direct_route_geometry=_line_string_from_points(
+            current_route_payload["direct_route"].get("polyline_points", [])
+        ),
     )
-    response_payload = with_saved_route_id(route_payload, map_payload, saved_route.id)
-    saved_route.route_payload = response_payload["route"]
-    saved_route.map_payload = response_payload["map"]
-    saved_route.save(update_fields=["route_payload", "map_payload"])
-    return saved_route
+    _replace_route_stops(
+        route=route,
+        base_route_payload=base_route_payload,
+        current_route_payload=current_route_payload,
+        excluded_stop_ids=list(excluded_stop_ids or []),
+        visited_stop_ids=list(visited_stop_ids or []),
+    )
+    return route
 
 
-def update_saved_route_snapshot(
+def update_tour_route_snapshot(
     *,
-    saved_route: SavedTourRoute,
+    route: TourRoute,
+    base_route_payload: dict,
+    current_route_payload: dict,
     excluded_stop_ids: list[str],
     visited_stop_ids: list[str],
-    route_payload: dict,
-    map_payload: dict,
-) -> dict:
-    response_payload = with_saved_route_id(route_payload, map_payload, saved_route.id)
-    saved_route.excluded_stop_ids = excluded_stop_ids
-    saved_route.visited_stop_ids = visited_stop_ids
-    saved_route.origin_label = route_payload["origin"]["label"]
-    saved_route.destination_label = route_payload["destination"]["label"]
-    saved_route.distance_m = int(route_payload["distance_m"])
-    saved_route.duration_s = int(route_payload["duration_s"])
-    saved_route.route_payload = response_payload["route"]
-    saved_route.map_payload = response_payload["map"]
-    saved_route.save(
+) -> TourRoute:
+    route.origin_label = current_route_payload["origin"]["label"]
+    route.destination_label = current_route_payload["destination"]["label"]
+    route.origin_location = _point_from_payload(current_route_payload["origin"]["location"])
+    route.destination_location = _point_from_payload(
+        current_route_payload["destination"]["location"]
+    )
+    route.mode = current_route_payload["mode"]
+    route.distance_m = int(current_route_payload["distance_m"])
+    route.duration_s = int(current_route_payload["duration_s"])
+    route.direct_distance_m = int(current_route_payload["direct_route"]["distance_m"])
+    route.direct_duration_s = int(current_route_payload["direct_route"]["duration_s"])
+    route.route_geometry = _line_string_from_points(
+        current_route_payload.get("polyline_points", [])
+    )
+    route.direct_route_geometry = _line_string_from_points(
+        current_route_payload["direct_route"].get("polyline_points", [])
+    )
+    route.save(
         update_fields=[
-            "excluded_stop_ids",
-            "visited_stop_ids",
             "origin_label",
             "destination_label",
+            "origin_location",
+            "destination_location",
+            "mode",
             "distance_m",
             "duration_s",
-            "route_payload",
-            "map_payload",
+            "direct_distance_m",
+            "direct_duration_s",
+            "route_geometry",
+            "direct_route_geometry",
             "updated_at",
         ]
     )
-    return response_payload
+    _replace_route_stops(
+        route=route,
+        base_route_payload=base_route_payload,
+        current_route_payload=current_route_payload,
+        excluded_stop_ids=excluded_stop_ids,
+        visited_stop_ids=visited_stop_ids,
+    )
+    return route
 
 
-def upsert_poi_detail_stubs(route_pois) -> None:
-    for poi in route_pois:
-        record, created = TourRoutePoiDetail.objects.get_or_create(
-            stop_id=poi.stop_id,
-            defaults={
-                "name": poi.name,
-                "category": poi.category,
-                "lat": poi.location.lat,
-                "lng": poi.location.lng,
-                "source": poi.source,
-                "osm_type": poi.osm_type or "",
-                "osm_id": poi.osm_id,
-                "wikidata_id": poi.wikidata_id or "",
-                "wikipedia_title": poi.wikipedia_title or "",
-                "address": poi.address or "",
-                "website": poi.website or "",
-                "opening_hours": poi.opening_hours or "",
-                "raw_payload": _build_raw_payload(poi.raw_tags),
-            },
-        )
-        if created:
-            continue
+def _replace_route_stops(
+    *,
+    route: TourRoute,
+    base_route_payload: dict,
+    current_route_payload: dict,
+    excluded_stop_ids: list[str],
+    visited_stop_ids: list[str],
+) -> None:
+    places_by_stop_id = upsert_places_from_route_payload(base_route_payload)
+    current_place_lookup = {
+        place["stop_id"]: place
+        for place in current_route_payload.get("places_to_pass", [])
+        if place.get("stop_id")
+    }
+    excluded_set = set(excluded_stop_ids)
+    visited_set = set(visited_stop_ids)
 
-        update_fields: list[str] = []
-        for field_name, value in (
-            ("name", poi.name),
-            ("category", poi.category),
-            ("lat", poi.location.lat),
-            ("lng", poi.location.lng),
-            ("source", poi.source),
-            ("osm_type", poi.osm_type or ""),
-            ("osm_id", poi.osm_id),
-            ("wikidata_id", poi.wikidata_id or ""),
-            ("wikipedia_title", poi.wikipedia_title or ""),
-        ):
-            if getattr(record, field_name) != value:
-                setattr(record, field_name, value)
-                update_fields.append(field_name)
-
-        for field_name, value in (
-            ("website", poi.website or ""),
-            ("opening_hours", poi.opening_hours or ""),
-        ):
-            if value and getattr(record, field_name) != value:
-                setattr(record, field_name, value)
-                update_fields.append(field_name)
-
-        if poi.address and not record.address:
-            record.address = poi.address
-            update_fields.append("address")
-
-        raw_payload = _build_raw_payload(poi.raw_tags)
-        if raw_payload and record.raw_payload != raw_payload:
-            record.raw_payload = raw_payload
-            update_fields.append("raw_payload")
-
-        if update_fields:
-            record.save(update_fields=[*update_fields, "updated_at"])
-
-
-def upsert_poi_detail_stubs_from_route_payload(route_payload: dict) -> None:
-    for place in route_payload.get("places_to_pass", []):
-        stop_id = place.get("stop_id")
-        location = place.get("location") or {}
+    TourRouteStop.objects.filter(route=route).delete()
+    stops_to_create: list[TourRouteStop] = []
+    for display_order, base_place_payload in enumerate(
+        base_route_payload.get("places_to_pass", []),
+        start=1,
+    ):
+        stop_id = base_place_payload.get("stop_id")
         if not stop_id:
             continue
-
-        record, created = TourRoutePoiDetail.objects.get_or_create(
-            stop_id=stop_id,
-            defaults={
-                "name": place.get("name", ""),
-                "category": place.get("category", ""),
-                "lat": float(location.get("lat", 0.0)),
-                "lng": float(location.get("lng", 0.0)),
-                "source": place.get("source", "cache"),
-            },
-        )
-        if created:
+        place = places_by_stop_id.get(stop_id)
+        if place is None:
             continue
 
-        update_fields: list[str] = []
-        for field_name, value in (
-            ("name", place.get("name", "")),
-            ("category", place.get("category", "")),
-            ("source", place.get("source", "cache")),
-        ):
-            if value and getattr(record, field_name) != value:
-                setattr(record, field_name, value)
-                update_fields.append(field_name)
+        current_payload = current_place_lookup.get(stop_id, base_place_payload)
+        if stop_id in excluded_set:
+            state = ROUTE_STOP_STATE_EXCLUDED
+            waypoint_order = None
+        elif stop_id in visited_set or current_payload.get("state") == ROUTE_STOP_STATE_VISITED:
+            state = ROUTE_STOP_STATE_VISITED
+            waypoint_order = None
+        else:
+            state = ROUTE_STOP_STATE_ACTIVE
+            waypoint_order = current_payload.get("waypoint_order")
 
-        lat = float(location.get("lat", record.lat))
-        lng = float(location.get("lng", record.lng))
-        if record.lat != lat:
-            record.lat = lat
-            update_fields.append("lat")
-        if record.lng != lng:
-            record.lng = lng
-            update_fields.append("lng")
+        stops_to_create.append(
+            TourRouteStop(
+                route=route,
+                place=place,
+                display_order=display_order,
+                waypoint_order=waypoint_order if isinstance(waypoint_order, int) else None,
+                state=state,
+                source=current_payload.get("source", base_place_payload.get("source", "")),
+                distance_from_route_m=int(
+                    round(
+                        float(
+                            current_payload.get(
+                                "distance_from_route_m",
+                                base_place_payload.get("distance_from_route_m", 0),
+                            )
+                        )
+                    )
+                ),
+            )
+        )
 
-        if update_fields:
-            record.save(update_fields=[*update_fields, "updated_at"])
+    if stops_to_create:
+        TourRouteStop.objects.bulk_create(stops_to_create)
 
 
 def _canonicalize_endpoint(endpoint_input: dict) -> dict:
@@ -257,7 +259,22 @@ def _canonicalize_endpoint(endpoint_input: dict) -> dict:
     }
 
 
-def _build_raw_payload(raw_tags: dict[str, str] | None) -> dict:
-    if not raw_tags:
-        return {}
-    return {"tags": raw_tags}
+def _point_from_payload(location_payload: dict) -> Point:
+    return Point(
+        float(location_payload["lng"]),
+        float(location_payload["lat"]),
+        srid=4326,
+    )
+
+
+def _line_string_from_points(points: list[dict]) -> LineString | None:
+    coordinates = [
+        (float(point["lng"]), float(point["lat"]))
+        for point in points
+        if point is not None
+    ]
+    if not coordinates:
+        return None
+    if len(coordinates) == 1:
+        coordinates = [coordinates[0], coordinates[0]]
+    return LineString(*coordinates, srid=4326)
