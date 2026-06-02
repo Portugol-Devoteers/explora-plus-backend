@@ -53,6 +53,9 @@ class TourRoutePoiDetailFetcher:
                 )
                 image_url = image_url or self._build_wikidata_image_url(wikidata_payload)
 
+            if not wikipedia_title:
+                wikipedia_title = self._search_wikipedia_by_name(place.name)
+
             summary_payload = self._fetch_wikipedia_summary(wikipedia_title)
             if summary_payload:
                 raw_payload["wikipedia_summary"] = summary_payload
@@ -158,6 +161,29 @@ class TourRoutePoiDetailFetcher:
             self.wikipedia_summary_url.format(lang=lang, title=quote(title)),
             timeout=12.0,
         )
+
+    def _search_wikipedia_by_name(self, name: str) -> str | None:
+        for lang in ("pt", "en"):
+            try:
+                payload = self.client.get_json(
+                    f"https://{lang}.wikipedia.org/w/api.php",
+                    params={
+                        "action": "query",
+                        "list": "search",
+                        "srsearch": name,
+                        "format": "json",
+                        "srlimit": "1",
+                    },
+                    timeout=8.0,
+                )
+                results = (payload.get("query") or {}).get("search") or []
+                if results:
+                    title = results[0].get("title")
+                    if title:
+                        return f"{lang}:{title}"
+            except (HTTPError, URLError, TimeoutError, ValueError):
+                continue
+        return None
 
     def _pick_wikipedia_title(self, wikidata_payload: dict) -> str | None:
         sitelinks = wikidata_payload.get("sitelinks") or {}

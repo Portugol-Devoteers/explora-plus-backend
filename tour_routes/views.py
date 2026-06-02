@@ -211,7 +211,7 @@ class SavedTourRouteStopStateView(APIView):
         if stop_id in excluded_stop_ids:
             return Response({"detail": "Parada removida da rota."}, status=404)
 
-        wants_visited = serializer.validated_data["state"] == TOUR_ROUTE_STOP_STATE_VISITED
+        wants_visited = serializer.validated_data["state"] == ROUTE_STOP_STATE_VISITED
         state = set_user_place_visited(
             user=request.user,
             stop_id=stop_id,
