@@ -87,6 +87,7 @@ def create_saved_route(
     destination_query: str,
     route_payload: dict,
     map_payload: dict,
+    visited_stop_ids: list[str] | None = None,
 ) -> SavedTourRoute:
     saved_route = SavedTourRoute.objects.create(
         user=user,
@@ -95,6 +96,7 @@ def create_saved_route(
         destination_query=destination_query,
         origin_label=route_payload["origin"]["label"],
         destination_label=route_payload["destination"]["label"],
+        visited_stop_ids=list(visited_stop_ids or []),
         distance_m=int(route_payload["distance_m"]),
         duration_s=int(route_payload["duration_s"]),
     )
@@ -193,6 +195,49 @@ def upsert_poi_detail_stubs(route_pois) -> None:
         if raw_payload and record.raw_payload != raw_payload:
             record.raw_payload = raw_payload
             update_fields.append("raw_payload")
+
+        if update_fields:
+            record.save(update_fields=[*update_fields, "updated_at"])
+
+
+def upsert_poi_detail_stubs_from_route_payload(route_payload: dict) -> None:
+    for place in route_payload.get("places_to_pass", []):
+        stop_id = place.get("stop_id")
+        location = place.get("location") or {}
+        if not stop_id:
+            continue
+
+        record, created = TourRoutePoiDetail.objects.get_or_create(
+            stop_id=stop_id,
+            defaults={
+                "name": place.get("name", ""),
+                "category": place.get("category", ""),
+                "lat": float(location.get("lat", 0.0)),
+                "lng": float(location.get("lng", 0.0)),
+                "source": place.get("source", "cache"),
+            },
+        )
+        if created:
+            continue
+
+        update_fields: list[str] = []
+        for field_name, value in (
+            ("name", place.get("name", "")),
+            ("category", place.get("category", "")),
+            ("source", place.get("source", "cache")),
+        ):
+            if value and getattr(record, field_name) != value:
+                setattr(record, field_name, value)
+                update_fields.append(field_name)
+
+        lat = float(location.get("lat", record.lat))
+        lng = float(location.get("lng", record.lng))
+        if record.lat != lat:
+            record.lat = lat
+            update_fields.append("lat")
+        if record.lng != lng:
+            record.lng = lng
+            update_fields.append("lng")
 
         if update_fields:
             record.save(update_fields=[*update_fields, "updated_at"])

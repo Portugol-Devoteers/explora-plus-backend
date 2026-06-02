@@ -90,3 +90,46 @@ class TourRoutePoiDetail(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class UserTourPlace(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="tour_places",
+    )
+    poi_detail = models.ForeignKey(
+        TourRoutePoiDetail,
+        on_delete=models.CASCADE,
+        related_name="user_places",
+    )
+    is_visited = models.BooleanField(default=False)
+    visited_at = models.DateTimeField(null=True, blank=True)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    seen_count = models.PositiveIntegerField(default=1)
+    last_seen_route = models.ForeignKey(
+        SavedTourRoute,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="seen_places",
+    )
+
+    class Meta:
+        verbose_name = "Lugar de rota do usuario"
+        verbose_name_plural = "Lugares de rota do usuario"
+        ordering = ["-last_seen_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "poi_detail"],
+                name="tour_routes_unique_user_poi_place",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["user", "-last_seen_at"]),
+            models.Index(fields=["user", "is_visited"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} -> {self.poi_detail.name}"

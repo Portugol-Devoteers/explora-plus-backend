@@ -100,6 +100,24 @@ class TourRoutePoiDetailSerializer(serializers.ModelSerializer):
         return data
 
 
+class UserTourPlaceSerializer(serializers.Serializer):
+    stop_id = serializers.CharField()
+    name = serializers.CharField()
+    category = serializers.CharField()
+    image_url = serializers.URLField(allow_null=True)
+    address = serializers.CharField(allow_blank=True)
+    summary = serializers.CharField(allow_blank=True)
+    is_visited = serializers.BooleanField()
+    is_in_current_route = serializers.BooleanField()
+    is_excluded_from_current_route = serializers.BooleanField()
+    current_route_order = serializers.IntegerField(allow_null=True)
+    last_seen_at = serializers.DateTimeField()
+
+
+class UserTourPlaceVisitedSerializer(serializers.Serializer):
+    visited = serializers.BooleanField()
+
+
 def serialize_result(
     result: TourRouteResult,
     map_payload: dict,
@@ -153,3 +171,7 @@ def serialize_result(
 
 def serialize_poi_detail(poi_detail: TourRoutePoiDetail) -> dict:
     return TourRoutePoiDetailSerializer(instance=poi_detail).data
+
+
+def serialize_user_places(items: list[dict]) -> list[dict]:
+    return UserTourPlaceSerializer(instance=items, many=True).data
