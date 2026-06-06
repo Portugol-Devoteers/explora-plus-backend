@@ -5,19 +5,24 @@ from tour_routes.types import PoiCandidate
 from .geometry import haversine_distance_m, sample_route_positions
 
 SEGMENT_TARGET_M = 100.0
-SEGMENT_WINDOW_M = 50.0
 DEDUP_DISTANCE_M = 40.0
 
 
 class PoiSelector:
     def select(
-        self, candidates: list[PoiCandidate], route_distance_m: int
+        self,
+        candidates: list[PoiCandidate],
+        route_distance_m: int,
+        *,
+        poi_spacing_m: int = int(SEGMENT_TARGET_M),
     ) -> list[PoiCandidate]:
         if not candidates:
             return []
 
         deduplicated = self._deduplicate(candidates)
-        sample_positions = sample_route_positions(route_distance_m, interval_m=SEGMENT_TARGET_M)
+        spacing_m = max(1.0, float(poi_spacing_m))
+        segment_window_m = spacing_m / 2
+        sample_positions = sample_route_positions(route_distance_m, interval_m=spacing_m)
 
         chosen: list[PoiCandidate] = []
         chosen_ids: set[int] = set()
@@ -27,7 +32,7 @@ class PoiSelector:
                 candidate
                 for candidate in deduplicated
                 if id(candidate) not in chosen_ids
-                and abs(candidate.progress_m - target) <= SEGMENT_WINDOW_M
+                and abs(candidate.progress_m - target) <= segment_window_m
             ]
             if not eligible:
                 continue

@@ -7,6 +7,7 @@ Este repositorio concentra:
 - autenticacao JWT
 - catalogo canonico de lugares
 - planejamento de rotas turisticas
+- preferencias personalizadas de busca por usuario
 - cache tecnico de consultas externas
 - historico/rota atual do usuario
 - biblioteca pessoal de POIs vistos em rotas
@@ -90,7 +91,7 @@ explora-plus-backend/
 |   `-- management/commands/
 |       `-- seed_demo.py   # dados curados de demonstracao
 |-- tickets/               # endpoint isolado de ingressos mockados
-|-- tour_routes/           # planner, cache, rota atual, biblioteca do usuario
+|-- tour_routes/           # planner, cache, rota atual, biblioteca e preferencias
 |   |-- services/          # geocoding, routing, Overpass, OSM, map builder
 |   `-- tests/             # testes do fluxo de rotas
 |-- routes/                # legado, fora do caminho ativo
@@ -132,6 +133,7 @@ Arquivo: [manage.py](/C:/Users/lucas/Documents/Projects/academic/PCE/explora-plu
 flowchart LR
     FE[Frontend] --> TR[TourRouteView]
     TR --> CACHE[RouteSearchCache]
+    TR --> PREFS[UserRouteSearchPreference]
     TR --> PLANNER[Planner]
     PLANNER --> GEOCODE[Nominatim geocoding]
     PLANNER --> ROUTING[OSRM foot routing]
@@ -150,6 +152,7 @@ flowchart LR
 
 ```mermaid
 erDiagram
+    USER ||--|| USER_ROUTE_SEARCH_PREFERENCE : configures
     PLACE_CATEGORY ||--o{ PLACE : categorizes
     PLACE ||--o{ PLACE_IMAGE : has
     PLACE ||--o{ USER_PLACE_STATE : tracks
@@ -251,6 +254,39 @@ Esse model e o que sustenta o conceito de "ja visitado" no app.
 
 Arquivo: [tour_routes/models.py](/C:/Users/lucas/Documents/Projects/academic/PCE/explora-plus-backend/tour_routes/models.py)
 
+#### `UserRouteSearchPreference`
+
+Configuracao persistida por usuario para o pipeline do planner.
+
+Campos:
+
+- `user`
+- `include_culture`
+- `include_park`
+- `include_food`
+- `poi_spacing_m`
+- `max_search_radius_m`
+- `created_at`
+- `updated_at`
+
+Defaults atuais:
+
+- `include_culture = true`
+- `include_park = true`
+- `include_food = true`
+- `poi_spacing_m = 100`
+- `max_search_radius_m = 250`
+
+Presets aceitos:
+
+- distancia entre POIs: `75`, `100`, `150`
+- raio maximo de busca: `150`, `250`, `400`
+
+Regra importante:
+
+- salvar essas preferencias **nao** recalcula a rota atual
+- elas passam a valer apenas na proxima chamada de `POST /api/tour-routes/`
+
 #### `RouteSearchCache`
 
 Cache tecnico da busca.
@@ -259,6 +295,7 @@ Guarda:
 
 - chave canonica da consulta
 - origem e destino normalizados
+- preferencias efetivas usadas na busca
 - payload-base da rota
 - payload-base do mapa
 - contagem de hits
@@ -363,21 +400,22 @@ Ele continua no repo, mas esta isolado.
 ### Planejamento base
 
 1. O frontend chama `POST /api/tour-routes/`.
-2. O backend normaliza origem e destino.
-3. E montada uma chave canonica de cache.
-4. Se houver cache valido, ele e reaproveitado.
-5. Se nao houver, o planner:
+2. Se o usuario estiver autenticado, o backend carrega `UserRouteSearchPreference`; senao, usa defaults.
+3. O backend normaliza origem, destino e preferencias efetivas.
+4. E montada uma chave canonica de cache.
+5. Se houver cache valido, ele e reaproveitado.
+6. Se nao houver, o planner:
    - geocodifica origem/destino
    - calcula a rota pedestre base
-   - busca POIs proximos
-   - seleciona os POIs relevantes
+   - busca POIs proximos respeitando categorias habilitadas e raio maximo
+   - seleciona os POIs relevantes respeitando a distancia configurada entre paradas
    - monta o `route` + `map`
-6. Todo POI encontrado e materializado em `places.Place`.
-7. Se o usuario estiver autenticado:
+7. Todo POI encontrado e materializado em `places.Place`.
+8. Se o usuario estiver autenticado:
    - a rota e persistida como `TourRoute`
    - os stops sao persistidos como `TourRouteStop`
    - a biblioteca pessoal e atualizada via `UserPlaceState`
-8. A resposta publica e devolvida no contrato esperado pelo frontend.
+9. A resposta publica e devolvida no contrato esperado pelo frontend.
 
 ### Personalizacao
 
@@ -386,6 +424,25 @@ Quando o usuario personaliza a rota:
 - marcar como visitado altera `UserPlaceState`
 - excluir da rota altera `TourRouteStop.state`
 - a resposta publicada e sempre reconstruida a partir do modelo relacional
+
+### Preferencias de busca
+
+O app expoe dois endpoints dedicados:
+
+- `GET /api/tour-routes/preferences/`
+- `PATCH /api/tour-routes/preferences/`
+
+Eles controlam:
+
+- categorias habilitadas
+- distancia alvo entre POIs
+- raio maximo de elegibilidade em torno da rota base
+
+O efeito dessas configuracoes e temporal:
+
+- `GET /api/tour-routes/current/` continua abrindo a rota salva sem recalcular nada
+- `PATCH /preferences/` so persiste
+- a mudanca entra em vigor apenas quando o usuario toca `Gerar rota` novamente
 
 ### Detalhe de POI
 
@@ -580,6 +637,8 @@ Arquivo: [tour_routes/urls.py](/C:/Users/lucas/Documents/Projects/academic/PCE/e
 | --- | --- | --- | --- |
 | `POST` | `/api/tour-routes/` | opcional | calcula rota, usa cache, salva rota se autenticado |
 | `GET` | `/api/tour-routes/current/` | sim | abre a rota mais recente do usuario |
+| `GET` | `/api/tour-routes/preferences/` | sim | le preferencias salvas ou defaults do planner |
+| `PATCH` | `/api/tour-routes/preferences/` | sim | salva preferencias para a proxima busca |
 | `GET` | `/api/tour-routes/places/` | sim | biblioteca pessoal de lugares do usuario |
 | `GET` | `/api/tour-routes/pois/<stop_id>/` | nao | detalhe enriquecido de um POI |
 | `PATCH` | `/api/tour-routes/places/<stop_id>/visited/` | sim | marca/desmarca visitado globalmente |
@@ -684,6 +743,18 @@ O fluxo de rotas e detalhes depende de provedores externos:
 - detalhe complementar: Nominatim (extratags), Wikidata (imagem P18), Wikipedia (descricao e imagem)
 
 O enriquecimento de detalhe usa um fallback progressivo: se o lugar OSM nao tiver `wikidata`/`wikipedia` nos extratags, o backend pesquisa o Wikipedia diretamente pelo nome do lugar (primeiro em portugues, depois em ingles). Isso garante cobertura para lugares sem dados completos no OSM.
+
+### Cache leva preferencias em conta
+
+`RouteSearchCache` nao olha apenas para origem e destino. A chave canonica agora considera tambem:
+
+- `include_culture`
+- `include_park`
+- `include_food`
+- `poi_spacing_m`
+- `max_search_radius_m`
+
+Isso significa que duas pessoas podem pedir o mesmo trajeto textual, mas gerar caches diferentes se as preferencias de busca forem diferentes.
 
 ## Problemas comuns
 

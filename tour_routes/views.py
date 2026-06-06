@@ -21,12 +21,18 @@ from .persistence import (
 from .serializers import (
     SavedTourRouteStopStateSerializer,
     TourRouteRequestSerializer,
+    TourRoutePreferencesSerializer,
     UserTourPlaceSerializer,
     UserTourPlaceVisitedSerializer,
     serialize_poi_detail,
+    serialize_search_preferences,
     serialize_result,
     serialize_route_model,
     serialize_user_places,
+)
+from .search_preferences import (
+    get_search_preferences_for_user,
+    save_search_preferences_for_user,
 )
 from .services.exceptions import TourRouteError
 from .services.poi_details import build_poi_detail_fetcher
@@ -51,9 +57,11 @@ class TourRouteView(APIView):
 
         origin_input = serializer.validated_data["origin"]
         destination_input = serializer.validated_data["destination"]
+        search_preferences = get_search_preferences_for_user(request.user)
         cache_key, canonical_payload = build_search_cache_key(
             origin_input=origin_input,
             destination_input=destination_input,
+            search_preferences=search_preferences.as_dict(),
         )
         cache = RouteSearchCache.objects.filter(cache_key=cache_key).first()
 
@@ -63,6 +71,7 @@ class TourRouteView(APIView):
                 result, map_payload = planner.plan(
                     origin_input=origin_input,
                     destination_input=destination_input,
+                    search_preferences=search_preferences,
                 )
             except TourRouteError as exc:
                 return Response({"detail": str(exc)}, status=exc.status_code)
@@ -320,6 +329,28 @@ class UserTourPlaceVisitedView(APIView):
         if item is None:
             return Response({"detail": "Lugar nao encontrado na biblioteca."}, status=404)
         return Response(UserTourPlaceSerializer(instance=item).data)
+
+
+class TourRoutePreferencesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        preferences = get_search_preferences_for_user(request.user)
+        return Response(serialize_search_preferences(preferences))
+
+    def patch(self, request):
+        serializer = TourRoutePreferencesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        preferences = save_search_preferences_for_user(
+            request.user,
+            include_culture=serializer.validated_data["include_culture"],
+            include_park=serializer.validated_data["include_park"],
+            include_food=serializer.validated_data["include_food"],
+            poi_spacing_m=int(serializer.validated_data["poi_spacing_m"]),
+            max_search_radius_m=int(serializer.validated_data["max_search_radius_m"]),
+        )
+        return Response(serialize_search_preferences(preferences))
 
 
 def _endpoint_query(endpoint_input: dict) -> str:

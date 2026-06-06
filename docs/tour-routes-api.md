@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-O endpoint `POST /api/tour-routes/` calcula primeiro uma rota direta a pe entre origem e destino, usa esse trajeto para descobrir pontos de interesse e, quando possivel, monta uma rota turistica hibrida passando por todos os pontos selecionados.
+O endpoint `POST /api/tour-routes/` calcula primeiro uma rota direta a pe entre origem e destino, usa esse trajeto para descobrir pontos de interesse e, quando possivel, monta uma rota turistica passando pelos pontos selecionados.
 
 A resposta devolve:
 
@@ -11,11 +11,51 @@ A resposta devolve:
 - `route.places_to_pass`: a lista completa de sugestoes, indicando quais viraram paradas reais
 - `map`: um GeoJSON pronto para o app renderizar rota turistica, rota direta e marcadores
 
-Este servico nao usa autenticacao nem banco de dados.
+Este servico hoje usa autenticacao **opcional** e persiste dados quando o usuario esta logado:
+
+- cache tecnico em `RouteSearchCache`
+- rota atual/historico em `TourRoute`
+- stops em `TourRouteStop`
+- lugares em `Place`
+- visitados globais em `UserPlaceState`
+- preferencias de busca em `UserRouteSearchPreference`
 
 ## Endpoint
 
 `POST /api/tour-routes/`
+
+## Preferencias de busca relacionadas
+
+As preferencias nao entram no body do `POST`, mas influenciam a execucao quando o usuario esta autenticado.
+
+Endpoints:
+
+- `GET /api/tour-routes/preferences/`
+- `PATCH /api/tour-routes/preferences/`
+
+Campos:
+
+- `include_culture`
+- `include_park`
+- `include_food`
+- `poi_spacing_m`
+- `max_search_radius_m`
+
+Defaults:
+
+- categorias ligadas
+- `poi_spacing_m = 100`
+- `max_search_radius_m = 250`
+
+Presets aceitos:
+
+- `poi_spacing_m`: `75 | 100 | 150`
+- `max_search_radius_m`: `150 | 250 | 400`
+
+Regra funcional:
+
+- salvar preferencias nao recalcula a rota atual
+- elas passam a valer apenas na proxima chamada de `POST /api/tour-routes/`
 
 ## Request
 
@@ -122,6 +162,7 @@ Cada ponta da rota aceita **exatamente um** destes formatos:
 - `places_to_pass`: lista ordenada completa de pontos de interesse
 - `included_in_route`: informa se o ponto entrou como parada real
 - `waypoint_order`: ordem real da visita quando o ponto entrou na rota turistica
+- `state`: `active` ou `visited` para refletir a personalizacao do usuario logado
 
 ### `map`
 
@@ -146,6 +187,16 @@ curl -X POST http://localhost:8080/api/tour-routes/ \
 
 - `tour`: a rota ativa passa por todos os POIs selecionados usando trechos detalhados a pe entre as paradas, mas pode cortar diretamente pequenos saltos quando o mapa de ruas faz um contorno exagerado
 - `direct_fallback`: a rota ativa fica direta porque nao havia POIs suficientes ou porque a rota turistica nao ficou disponivel
+
+## Cache e chave canonica
+
+O cache nao olha apenas para origem e destino. A chave canonica considera:
+
+- origem normalizada
+- destino normalizado
+- preferencias efetivas de busca
+
+Isso significa que o mesmo par de enderecos pode gerar caches diferentes se o usuario mudar categorias, distancia entre POIs ou raio maximo.
 
 ## Erros esperados
 

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import RouteSearchCache, TourRoute, TourRouteStop
+from .models import RouteSearchCache, TourRoute, TourRouteStop, UserRouteSearchPreference
 
 
 class TourRouteStopInline(admin.TabularInline):
@@ -68,4 +68,19 @@ class TourRouteStopAdmin(admin.ModelAdmin):
         "place__name",
         "place__source_ref",
     )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(UserRouteSearchPreference)
+class UserRouteSearchPreferenceAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "include_culture",
+        "include_park",
+        "include_food",
+        "poi_spacing_m",
+        "max_search_radius_m",
+        "updated_at",
+    )
+    search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at", "updated_at")

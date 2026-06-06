@@ -9,6 +9,7 @@ from tour_routes.constants import (
     TOUR_ROUTE_STOP_STATE_ACTIVE,
     TOUR_ROUTE_STOP_STATE_VISITED,
 )
+from tour_routes.search_preferences import TourRouteSearchPreferences
 from tour_routes.types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
 
 from .exceptions import PoiSearchError
@@ -38,19 +39,30 @@ class TourRoutePlanner:
         self.poi_selector = poi_selector or PoiSelector()
         self.map_builder = map_builder or GeoJsonMapBuilder()
 
-    def plan(self, *, origin_input: dict, destination_input: dict):
+    def plan(
+        self,
+        *,
+        origin_input: dict,
+        destination_input: dict,
+        search_preferences: TourRouteSearchPreferences,
+    ):
         origin = self._resolve_endpoint(origin_input)
         destination = self._resolve_endpoint(destination_input)
         direct_route_path = self.router.route(origin, destination)
 
         try:
-            poi_candidates = self.poi_searcher.search(direct_route_path)
+            poi_candidates = self.poi_searcher.search(
+                direct_route_path,
+                enabled_categories=search_preferences.enabled_categories,
+                max_distance_from_route_m=search_preferences.max_search_radius_m,
+            )
         except PoiSearchError:
             poi_candidates = []
 
         selected_candidates = self.poi_selector.select(
             poi_candidates,
             route_distance_m=direct_route_path.distance_m,
+            poi_spacing_m=search_preferences.poi_spacing_m,
         )
         selected_places = [
             self._route_poi_from_candidate(candidate) for candidate in selected_candidates

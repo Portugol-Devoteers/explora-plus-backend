@@ -5,6 +5,7 @@ from .views import (
     SavedTourRouteStopDeleteView,
     SavedTourRouteStopStateView,
     TourRoutePoiDetailView,
+    TourRoutePreferencesView,
     TourRouteView,
     UserTourPlaceListView,
     UserTourPlaceVisitedView,
@@ -13,6 +14,7 @@ from .views import (
 urlpatterns = [
     path("", TourRouteView.as_view(), name="tour-route"),
     path("current/", CurrentTourRouteView.as_view(), name="tour-route-current"),
+    path("preferences/", TourRoutePreferencesView.as_view(), name="tour-route-preferences"),
     path("places/", UserTourPlaceListView.as_view(), name="tour-route-places"),
     path("pois/<str:stop_id>/", TourRoutePoiDetailView.as_view(), name="tour-route-poi-detail"),
     path(

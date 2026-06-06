@@ -9,12 +9,19 @@ from rest_framework.test import APITestCase
 from core.domain import ROUTE_STOP_STATE_EXCLUDED
 from places.models import Place, UserPlaceState
 from tour_routes.constants import (
+    TOUR_ROUTE_DEFAULT_MAX_SEARCH_RADIUS_M,
+    TOUR_ROUTE_DEFAULT_POI_SPACING_M,
     TOUR_ROUTE_MODE_DIRECT_FALLBACK,
     TOUR_ROUTE_MODE_TOUR,
     TOUR_ROUTE_STOP_STATE_ACTIVE,
     TOUR_ROUTE_STOP_STATE_VISITED,
 )
-from tour_routes.models import RouteSearchCache, TourRoute, TourRouteStop
+from tour_routes.models import (
+    RouteSearchCache,
+    TourRoute,
+    TourRouteStop,
+    UserRouteSearchPreference,
+)
 from tour_routes.persistence import build_search_cache_key, create_tour_route
 from tour_routes.serializers import serialize_result
 from tour_routes.services.exceptions import TourRouteError
@@ -617,3 +624,149 @@ class TourRouteViewTests(APITestCase):
         from places.catalog import get_or_create_place_category
 
         return get_or_create_place_category(slug)
+
+    def test_get_preferences_returns_defaults_without_saved_row(self):
+        user = User.objects.create_user(
+            username="preferences-user",
+            email="preferences@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get(reverse("tour-route-preferences"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data,
+            {
+                "include_culture": True,
+                "include_park": True,
+                "include_food": True,
+                "poi_spacing_m": TOUR_ROUTE_DEFAULT_POI_SPACING_M,
+                "max_search_radius_m": TOUR_ROUTE_DEFAULT_MAX_SEARCH_RADIUS_M,
+            },
+        )
+        self.assertFalse(UserRouteSearchPreference.objects.filter(user=user).exists())
+
+    def test_patch_preferences_persists_valid_values(self):
+        user = User.objects.create_user(
+            username="preferences-update-user",
+            email="preferences-update@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.patch(
+            reverse("tour-route-preferences"),
+            data={
+                "include_culture": True,
+                "include_park": False,
+                "include_food": True,
+                "poi_spacing_m": 150,
+                "max_search_radius_m": 400,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["poi_spacing_m"], 150)
+        self.assertEqual(response.data["max_search_radius_m"], 400)
+        preferences = UserRouteSearchPreference.objects.get(user=user)
+        self.assertFalse(preferences.include_park)
+        self.assertEqual(preferences.poi_spacing_m, 150)
+        self.assertEqual(preferences.max_search_radius_m, 400)
+
+    def test_patch_preferences_rejects_all_categories_disabled(self):
+        user = User.objects.create_user(
+            username="preferences-invalid-user",
+            email="preferences-invalid@example.com",
+            password="secret123",
+        )
+        self.client.force_authenticate(user=user)
+
+        response = self.client.patch(
+            reverse("tour-route-preferences"),
+            data={
+                "include_culture": False,
+                "include_park": False,
+                "include_food": False,
+                "poi_spacing_m": 100,
+                "max_search_radius_m": 250,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Ative pelo menos uma categoria", str(response.data))
+        self.assertFalse(UserRouteSearchPreference.objects.filter(user=user).exists())
+
+    def test_cache_key_changes_when_preferences_change(self):
+        base_key, base_payload = build_search_cache_key(
+            origin_input={"address": "Av. Paulista, 1578, Sao Paulo"},
+            destination_input={"address": "Av. Paulista, 2300, Sao Paulo"},
+            search_preferences={
+                "include_culture": True,
+                "include_park": True,
+                "include_food": True,
+                "poi_spacing_m": 100,
+                "max_search_radius_m": 250,
+            },
+        )
+        variant_key, variant_payload = build_search_cache_key(
+            origin_input={"address": "Av. Paulista, 1578, Sao Paulo"},
+            destination_input={"address": "Av. Paulista, 2300, Sao Paulo"},
+            search_preferences={
+                "include_culture": True,
+                "include_park": False,
+                "include_food": True,
+                "poi_spacing_m": 150,
+                "max_search_radius_m": 400,
+            },
+        )
+
+        self.assertNotEqual(base_key, variant_key)
+        self.assertNotEqual(base_payload["preferences"], variant_payload["preferences"])
+
+    @patch("tour_routes.views.build_default_planner")
+    def test_authenticated_post_uses_saved_preferences_on_new_search(self, mock_build_planner):
+        user = User.objects.create_user(
+            username="preferences-applied-user",
+            email="preferences-applied@example.com",
+            password="secret123",
+        )
+        UserRouteSearchPreference.objects.create(
+            user=user,
+            include_culture=True,
+            include_park=False,
+            include_food=True,
+            poi_spacing_m=75,
+            max_search_radius_m=150,
+        )
+        self.client.force_authenticate(user=user)
+
+        result = self._build_result(
+            places_to_pass=[
+                self._make_route_poi(
+                    stop_id="masp-stop",
+                    name="MASP",
+                    category="culture",
+                    lat=-23.561414,
+                    lng=-46.655881,
+                    waypoint_order=1,
+                )
+            ]
+        )
+        planner = Mock()
+        planner.plan.return_value = (result, GeoJsonMapBuilder().build(result))
+        mock_build_planner.return_value = planner
+
+        response = self._post_route()
+
+        self.assertEqual(response.status_code, 200)
+        planner.plan.assert_called_once()
+        search_preferences = planner.plan.call_args.kwargs["search_preferences"]
+        self.assertTrue(search_preferences.include_culture)
+        self.assertFalse(search_preferences.include_park)
+        self.assertTrue(search_preferences.include_food)
+        self.assertEqual(search_preferences.poi_spacing_m, 75)
+        self.assertEqual(search_preferences.max_search_radius_m, 150)

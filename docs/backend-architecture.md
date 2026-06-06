@@ -30,22 +30,28 @@ Current canonical entities:
 
 Current entities:
 
+- `UserRouteSearchPreference`: persisted planner settings for an authenticated user
 - `RouteSearchCache`: base planner/cache payload
 - `TourRoute`: persisted current/historic route for a user
 - `TourRouteStop`: relational stop list for the route
 
 Route personalization rules:
 
+- planner search settings live in `tour_routes.UserRouteSearchPreference`
+- saved preferences apply only to the next `POST /api/tour-routes/`
 - global visited state lives in `places.UserPlaceState`
 - route-only exclusion lives in `tour_routes.TourRouteStop.state`
 - active API responses are rebuilt from relational route data
 - cache JSON remains only as technical input for recalculating a personalized route
+- cache keys include effective search preferences as well as origin/destination
 
 ## Compatibility boundary
 
 The frontend MVP contract remains stable:
 
 - `POST /api/tour-routes/`
+- `GET /api/tour-routes/preferences/`
+- `PATCH /api/tour-routes/preferences/`
 - `GET /api/tour-routes/current/`
 - `GET /api/tour-routes/places/`
 - `PATCH /api/tour-routes/places/<stop_id>/visited/`

@@ -6,6 +6,7 @@ from places.models import Place
 
 from .constants import TOUR_ROUTE_STOP_STATES
 from .models import TourRoute
+from .search_preferences import TourRouteSearchPreferences
 from .services.map_builder import GeoJsonMapBuilder
 from .types import GeoPoint, ResolvedPoint, RoutePath, RoutePoi, TourRouteResult
 
@@ -110,6 +111,27 @@ class UserTourPlaceVisitedSerializer(serializers.Serializer):
     visited = serializers.BooleanField()
 
 
+class TourRoutePreferencesSerializer(serializers.Serializer):
+    include_culture = serializers.BooleanField()
+    include_park = serializers.BooleanField()
+    include_food = serializers.BooleanField()
+    poi_spacing_m = serializers.ChoiceField(choices=(75, 100, 150))
+    max_search_radius_m = serializers.ChoiceField(choices=(150, 250, 400))
+
+    def validate(self, attrs):
+        if not any(
+            [
+                attrs.get("include_culture"),
+                attrs.get("include_park"),
+                attrs.get("include_food"),
+            ]
+        ):
+            raise serializers.ValidationError(
+                "Ative pelo menos uma categoria para a busca."
+            )
+        return attrs
+
+
 def serialize_result(
     result: TourRouteResult,
     map_payload: dict,
@@ -187,6 +209,10 @@ def serialize_poi_detail(place: Place) -> dict:
 
 def serialize_user_places(items: list[dict]) -> list[dict]:
     return UserTourPlaceSerializer(instance=items, many=True).data
+
+
+def serialize_search_preferences(preferences: TourRouteSearchPreferences) -> dict:
+    return TourRoutePreferencesSerializer(instance=preferences.as_dict()).data
 
 
 def _result_from_route(route: TourRoute) -> TourRouteResult:

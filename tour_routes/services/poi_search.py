@@ -14,9 +14,6 @@ from .exceptions import PoiSearchError
 from .geometry import expand_bbox, project_point_onto_route
 from .http import JsonHttpClient
 
-MAX_DISTANCE_FROM_ROUTE_M = 250.0
-
-
 class OverpassPoiSearcher:
     endpoint = "https://overpass-api.de/api/interpreter"
     category_priority = TOUR_ROUTE_CATEGORY_PRIORITY
@@ -24,12 +21,20 @@ class OverpassPoiSearcher:
     def __init__(self, client: JsonHttpClient | None = None):
         self.client = client or JsonHttpClient()
 
-    def search(self, route_path: RoutePath) -> list[PoiCandidate]:
+    def search(
+        self,
+        route_path: RoutePath,
+        *,
+        enabled_categories: tuple[str, ...],
+        max_distance_from_route_m: int,
+    ) -> list[PoiCandidate]:
         if not route_path.coordinates:
             return []
+        if not enabled_categories:
+            return []
 
-        bbox = expand_bbox(route_path.coordinates, padding_m=MAX_DISTANCE_FROM_ROUTE_M)
-        query = self._build_query(*bbox)
+        bbox = expand_bbox(route_path.coordinates, padding_m=float(max_distance_from_route_m))
+        query = self._build_query(*bbox, enabled_categories=enabled_categories)
 
         try:
             payload = self.client.post_text_json(self.endpoint, body=query)
@@ -58,7 +63,7 @@ class OverpassPoiSearcher:
             distance_from_route_m, progress_m = project_point_onto_route(
                 point, route_path.coordinates
             )
-            if distance_from_route_m > MAX_DISTANCE_FROM_ROUTE_M:
+            if distance_from_route_m > float(max_distance_from_route_m):
                 continue
 
             candidates.append(
@@ -87,17 +92,40 @@ class OverpassPoiSearcher:
 
         return candidates
 
-    def _build_query(self, south: float, west: float, north: float, east: float) -> str:
+    def _build_query(
+        self,
+        south: float,
+        west: float,
+        north: float,
+        east: float,
+        *,
+        enabled_categories: tuple[str, ...],
+    ) -> str:
         bbox = f"({south},{west},{north},{east})"
+        clauses: list[str] = []
+        if TOUR_ROUTE_CATEGORY_CULTURE in enabled_categories:
+            clauses.extend(
+                [
+                    f'nwr["tourism"~"museum|gallery|attraction|artwork"]{bbox};',
+                    f'nwr["historic"]{bbox};',
+                    f'nwr["amenity"~"theatre|arts_centre"]{bbox};',
+                ]
+            )
+        if TOUR_ROUTE_CATEGORY_PARK in enabled_categories:
+            clauses.extend(
+                [
+                    f'nwr["leisure"~"park|garden"]{bbox};',
+                    f'nwr["tourism"="viewpoint"]{bbox};',
+                ]
+            )
+        if TOUR_ROUTE_CATEGORY_FOOD in enabled_categories:
+            clauses.append(f'nwr["amenity"~"restaurant|cafe"]{bbox};')
+
+        query_body = "\n  ".join(clauses)
         return f"""
 [out:json][timeout:25];
 (
-  nwr["tourism"~"museum|gallery|attraction|artwork"]{bbox};
-  nwr["historic"]{bbox};
-  nwr["amenity"~"theatre|arts_centre"]{bbox};
-  nwr["leisure"~"park|garden"]{bbox};
-  nwr["tourism"="viewpoint"]{bbox};
-  nwr["amenity"~"restaurant|cafe"]{bbox};
+  {query_body}
 );
 out center tags;
 """.strip()

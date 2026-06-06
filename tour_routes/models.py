@@ -4,6 +4,15 @@ from django.conf import settings
 from django.contrib.gis.db import models
 
 from core.domain import ROUTE_MODE_TOUR, ROUTE_STOP_STATE_CHOICES, ROUTE_STOP_STATE_ACTIVE
+from .constants import (
+    TOUR_ROUTE_DEFAULT_INCLUDE_CULTURE,
+    TOUR_ROUTE_DEFAULT_INCLUDE_FOOD,
+    TOUR_ROUTE_DEFAULT_INCLUDE_PARK,
+    TOUR_ROUTE_DEFAULT_MAX_SEARCH_RADIUS_M,
+    TOUR_ROUTE_DEFAULT_POI_SPACING_M,
+    TOUR_ROUTE_MAX_SEARCH_RADIUS_PRESETS,
+    TOUR_ROUTE_POI_SPACING_PRESETS,
+)
 
 
 class RouteSearchCache(models.Model):
@@ -24,6 +33,34 @@ class RouteSearchCache(models.Model):
 
     def __str__(self) -> str:
         return f"{self.origin_query} -> {self.destination_query}"
+
+
+class UserRouteSearchPreference(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="route_search_preferences",
+    )
+    include_culture = models.BooleanField(default=TOUR_ROUTE_DEFAULT_INCLUDE_CULTURE)
+    include_park = models.BooleanField(default=TOUR_ROUTE_DEFAULT_INCLUDE_PARK)
+    include_food = models.BooleanField(default=TOUR_ROUTE_DEFAULT_INCLUDE_FOOD)
+    poi_spacing_m = models.PositiveSmallIntegerField(
+        default=TOUR_ROUTE_DEFAULT_POI_SPACING_M,
+        choices=[(value, f"{value} m") for value in TOUR_ROUTE_POI_SPACING_PRESETS],
+    )
+    max_search_radius_m = models.PositiveSmallIntegerField(
+        default=TOUR_ROUTE_DEFAULT_MAX_SEARCH_RADIUS_M,
+        choices=[(value, f"{value} m") for value in TOUR_ROUTE_MAX_SEARCH_RADIUS_PRESETS],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "User route search preference"
+        verbose_name_plural = "User route search preferences"
+
+    def __str__(self) -> str:
+        return f"{self.user_id} route search preferences"
 
 
 class TourRoute(models.Model):

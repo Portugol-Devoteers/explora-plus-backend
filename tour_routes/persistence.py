@@ -12,10 +12,16 @@ from places.catalog import upsert_places_from_route_payload
 from .models import RouteSearchCache, TourRoute, TourRouteStop
 
 
-def build_search_cache_key(*, origin_input: dict, destination_input: dict) -> tuple[str, dict]:
+def build_search_cache_key(
+    *,
+    origin_input: dict,
+    destination_input: dict,
+    search_preferences: dict | None = None,
+) -> tuple[str, dict]:
     canonical_payload = {
         "origin": _canonicalize_endpoint(origin_input),
         "destination": _canonicalize_endpoint(destination_input),
+        "preferences": _canonicalize_preferences(search_preferences or {}),
     }
     serialized = json.dumps(
         canonical_payload,
@@ -256,6 +262,16 @@ def _canonicalize_endpoint(endpoint_input: dict) -> dict:
             "lat": round(float(location["lat"]), 6),
             "lng": round(float(location["lng"]), 6),
         }
+    }
+
+
+def _canonicalize_preferences(search_preferences: dict) -> dict:
+    return {
+        "include_culture": bool(search_preferences.get("include_culture", True)),
+        "include_park": bool(search_preferences.get("include_park", True)),
+        "include_food": bool(search_preferences.get("include_food", True)),
+        "poi_spacing_m": int(search_preferences.get("poi_spacing_m", 100)),
+        "max_search_radius_m": int(search_preferences.get("max_search_radius_m", 250)),
     }
 
 
