@@ -578,7 +578,7 @@ docker compose exec backend python manage.py seed_demo --reset
 ### Testes
 
 ```bash
-docker compose exec backend python manage.py test tour_routes.tests --settings=tour_routes.test_settings --verbosity 2 --noinput
+docker compose exec backend python manage.py test tour_routes.tests --settings=explora_plus.settings.test --verbosity 2 --noinput
 ```
 
 ### Verificacoes de estrutura
@@ -688,14 +688,14 @@ O miolo mais sensivel do projeto esta em `tour_routes`.
 Comando:
 
 ```bash
-docker compose exec backend python manage.py test tour_routes.tests --settings=tour_routes.test_settings --verbosity 2 --noinput
+docker compose exec backend python manage.py test tour_routes.tests --settings=explora_plus.settings.test --verbosity 2 --noinput
 ```
 
 ### O que vale conferir antes de subir mudancas
 
 ```bash
 docker compose exec backend python manage.py makemigrations --check --dry-run
-docker compose exec backend python manage.py test tour_routes.tests --settings=tour_routes.test_settings --verbosity 2 --noinput
+docker compose exec backend python manage.py test tour_routes.tests --settings=explora_plus.settings.test --verbosity 2 --noinput
 ```
 
 ### Quando fizer alteracoes de banco
